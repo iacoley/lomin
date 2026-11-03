@@ -2668,7 +2668,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         gap = {"used": [], "open": False, "mid": False, "slow": False,
                "ticks": 0, "first_ms": None}
         gap_enabled = GAP_FILL and stream_mode and opts.get("gap_fill", True)
-        spoke = {"state": False, "chunk_idx": 0}
+        spoke = {"state": False, "synth": False, "chunk_idx": 0}
         target = ctx.get("target") or resolve_target(node_id)
 
         def _mark_speaking() -> bool:
@@ -2677,10 +2677,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return self._sse("state", {"state": "speaking"})
             return True
 
+        def _mark_synthesizing() -> bool:
+            """`state: synthesizing`, once, when the first real sentence goes to
+            TTS and nothing has been spoken yet. Text-only turns never synthesize."""
+            if voice and not text_mode and not spoke["synth"] and not spoke["state"]:
+                spoke["synth"] = True
+                return self._sse("state", {"state": "synthesizing"})
+            return True
+
         def _write_sentence(event: dict) -> bool:
             """One audio/text `sentence` event; with audio_chunk, also the
-            hub-dialect `audio_chunk` the room ear plays from. False = client gone."""
-            if not _mark_speaking() or not self._sse("sentence", event):
+            hub-dialect `audio_chunk` the room ear plays from. False = client gone.
+            A gap-fill clip (`filler`) is not the answer, so it does not move the
+            turn to `speaking`."""
+            if not event.get("filler") and not _mark_speaking():
+                return False
+            if not self._sse("sentence", event):
                 return False
             if audio_chunk and event.get("audio_b64") is not None:
                 chunk = {"chunk_index": spoke["chunk_idx"], "format": event.get("format", "wav"),
@@ -2955,6 +2967,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if next_idx >= available:
                     return next_idx
                 fut = futures[next_idx]
+                if not _mark_synthesizing():
+                    return None
                 if text_mode:
                     if not _write_sentence({"text": fut, "engine": "text"}):
                         return None

@@ -150,7 +150,7 @@ def test_stage_order_and_events(server, stubs):
     ns = names(events)
     assert ns[0] == "turn"
     states = [d["state"] for e, d in events if e == "state"]
-    assert states == ["transcribing", "classifying", "thinking", "speaking"]
+    assert states == ["transcribing", "classifying", "thinking", "synthesizing", "speaking"]
     # Fixed order of the stages on the wire.
     pos = lambda n: ns.index(n)  # noqa: E731
     assert pos("turn") < pos("transcript") < pos("sentence") < pos("reply") < pos("done")

@@ -800,7 +800,7 @@ Headers: `X-Voice-Claimed-Speaker` + `X-Voice-Gateway-Key` (must equal env
 `MVG_TRUSTED_KEY`; otherwise the claim is ignored, as it is whenever the env
 var is unset). Never a body field.
 
-Events: `turn{turn_id,node_id}`, `state{state: transcribing|classifying|thinking|speaking}`,
+Events: `turn{turn_id,node_id}`, `state{state: transcribing|classifying|thinking|synthesizing|speaking}` (`synthesizing`: the first sentence is going to TTS and nothing has played; a gap-fill clip, whose `sentence` carries `filler: true`, does not send `speaking`),
 `transcript{text,transcript,speaker,voice_id}`, `ignored{reason: no-speech|hallucination|not-addressed, score?, classifier?}`
 (terminal, no `done`), `status{status}` (keepalive), `sentence{text,engine,format?,sample_rate?,channels?,audio_b64?}`,
 `audio_chunk{chunk_index,format,is_final,data,sample_rate?,channels?}` (opt-in), `reply{reply,text,tts_engine}`,

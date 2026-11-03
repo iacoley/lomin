@@ -51,10 +51,18 @@ def stable_markdown_prefix(text: str) -> str:
 
 def unspoken_delta(full_stripped: str, spoken: str) -> str:
     """Text in full_stripped not yet spoken. Normally full_stripped extends
-    spoken. If an already-spoken span was rewritten, resume at the longest
-    common prefix: repeating a few words beats silently skipping new ones."""
+    spoken. If the streamed text already ends with the whole of full_stripped
+    (an earlier block, then this reply), nothing is left. If an already-spoken
+    span was rewritten, resume at the longest common prefix: repeating a few
+    words beats silently skipping new ones."""
     if full_stripped.startswith(spoken):
         return full_stripped[len(spoken):]
+    tail = full_stripped.strip()
+    if tail and spoken.rstrip().endswith(tail):
+        # The final reply is already the last thing spoken: the streamed text
+        # carried an earlier block (narration before a tool call) and then
+        # this reply, so the final does not extend it but was heard in full.
+        return ""
     n = 0
     for a, b in zip(full_stripped, spoken):
         if a != b:
