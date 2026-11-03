@@ -137,10 +137,17 @@ def test_http_hook_missing_url_raises(monkeypatch):
 class _FakeResponse:
     def __init__(self, body: bytes, status: int = 200):
         self._body = body
+        self._pos = 0
         self.status = status
 
-    def read(self):
-        return self._body
+    def read(self, n: int = -1):
+        if n is None or n < 0:
+            rem = self._body[self._pos:]
+            self._pos = len(self._body)
+            return rem
+        chunk = self._body[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
 
     def __enter__(self):
         return self
