@@ -123,6 +123,9 @@ def load_backend(name: str) -> type:
     MVG_TALKER_BACKENDS). Unknown names raise ValueError listing what exists."""
     if name in _REGISTRY:
         return _REGISTRY[name]
+    if name == "gemini":
+        from gemini_live import GeminiLiveBackend
+        return GeminiLiveBackend
     plugins = _plugin_entries()
     if name in plugins:
         module, _, cls = plugins[name].partition(":")
@@ -130,5 +133,5 @@ def load_backend(name: str) -> type:
             return getattr(importlib.import_module(module), cls)
         except (ImportError, AttributeError) as exc:
             raise ValueError(f"talker backend {name!r} ({plugins[name]}) failed to load: {exc}") from exc
-    known = sorted(set(_REGISTRY) | set(plugins))
+    known = sorted(set(_REGISTRY) | set(plugins) | {"gemini"})
     raise ValueError(f"unknown talker backend {name!r}; known: {', '.join(known) or 'none'}")
