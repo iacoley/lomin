@@ -25,7 +25,7 @@ MVG_BRAIN=http MVG_BRAIN_URL=http://127.0.0.1:8000/brain python3 gateway.py
 |---|---|---|
 | `apply_defaults()` | `-> None` | fill env defaults (`setdefault` only) before the config reads them |
 | `brain_call(target, prompt, timeout)` | `-> str` | the agent answers one framed prompt |
-| `brain_call_stream(target, prompt, timeout, on_partial, stages_out)` | `-> str` | streaming brain: call `on_partial(text_so_far)` as the reply grows |
+| `brain_call_stream(target, prompt, timeout, on_partial, stages_out)` | `-> str` | streaming brain: call `on_partial(text_so_far)` as the reply grows. If the signature also takes `audio_clips` (or `**kwargs`) and `MVG_SPLICE_RAW_AUDIO=1`, it gets `audio_clips=[wav_bytes, ...]`: the turn's 16 kHz WAV, so a multimodal brain can hear the original audio. A hook without it is called exactly as before |
 | `classify` | module with `classify_choice(...)` | addressee classifier for `/ambient` and open rooms |
 | `try_intent(text)` | `-> dict \| None` | deterministic fast path; see "Fast path" below |
 | `AMBIENT_LAYA_QUESTION`, `VOICE_ADDRESSED_INSTRUCTIONS` | `str` | replace the addressee classifier's wording, for a site whose classifier was tuned on its own text |
@@ -209,6 +209,8 @@ Every variable below is also listed, commented, in `.env.example`. Secrets have 
 | `MVG_TTS_STREAM_MIN_CHUNK_BYTES` | `4800` (~100 ms, the hub's own forwarding floor) |
 | `MVG_GAP_FILL` | `1` — filler clips while the brain is silent, pcm stream mode only (see "Gap-fill and latency metrics"); `0` disables |
 | `MVG_GAP_FILL_DIR` | `<gateway dir>/gap-fill` |
+| `MVG_SPLICE_RAW_AUDIO` | `0` — `1` passes the turn's WAV to the plugin's `brain_call_stream` as `audio_clips` (only if its signature accepts it); ADPCM and vision handling are unchanged |
+| `MVG_AUDIO_CLIPS_MAX_BYTES` | `2097152` — total clip bytes over this are dropped and logged to `voice_fallback.log` (`audio_clips_over_cap`); the turn continues |
 | `MVG_GAP_FILL_AFTER_MS` | `1200` — no real audio by this long after request start: emit one acknowledge/thinking clip |
 | `MVG_GAP_FILL_LONG_MS` | `5000` — silence (audio already sent has finished playing) longer than this while the brain still works: emit one long_wait clip, at most one per turn |
 | `MVG_TEXT_SENTENCES` | `0` — `1` makes `/ask/stream` send text-only `sentence` events (no `audio_b64`) and makes `/v1/audio/speech` stream (44-byte WAV header with unknown sizes, then 24 kHz mono PCM as synthesized; `"stream": false` in the request keeps the complete-WAV reply). For a hub's native streaming TTS client. Gap-fill is disabled in this mode: the hub latches a turn to brain-audio or remote-tts and rejects a mix, and a clip is audio |
