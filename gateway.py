@@ -241,6 +241,7 @@ if _plugin is not None and hasattr(_plugin, "apply_defaults"):
     _plugin.apply_defaults()
 _plugin_brain_call = getattr(_plugin, "brain_call", None)
 _plugin_brain_call_stream = getattr(_plugin, "brain_call_stream", None)
+_plugin_brain_cancel = getattr(_plugin, "brain_cancel", None)
 # Kept as `_jev_classifier`: test_ambient.py monkeypatches its attributes.
 _jev_classifier = getattr(_plugin, "classify", None)
 _try_intent = getattr(_plugin, "try_intent", None) or (lambda text: None)
@@ -2068,8 +2069,19 @@ def http_brain_call_stream(prompt: str, session_id: str, node_id: str, speaker: 
 BRAIN_CALL = http_brain_call if MVG_BRAIN == "http" else plugin_brain_call
 
 
+def _accepts_kwarg(fn, name: str) -> bool:
+    """True if fn takes a keyword `name` (or **kwargs). Checked per call so a
+    patched hook is honoured; a signature that cannot be read counts as no."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (ValueError, TypeError):
+        return False
+    return name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def plugin_brain_call_stream(prompt: str, session_id: str, node_id: str, speaker: str,
-                             speaker_score, timeout: int, on_partial) -> str:
+                             speaker_score, timeout: int, on_partial,
+                             task_id: str | None = None) -> str:
     """Streaming brain through the plugin. With a plugin brain_call_stream, that
     hook gets on_partial and the per-turn stage sink. Without one, the plugin's
     plain brain_call answers and on_partial fires once with the full reply."""
@@ -2078,9 +2090,12 @@ def plugin_brain_call_stream(prompt: str, session_id: str, node_id: str, speaker
         on_partial(reply)
         return reply
     wrapped = _frame_for_call(prompt, node_id, speaker, speaker_score)
+    extra = {}
+    if task_id is not None and _accepts_kwarg(_plugin_brain_call_stream, "task_id"):
+        extra["task_id"] = task_id
     return _plugin_brain_call_stream(
         _call_target(node_id), wrapped, timeout, on_partial,
-        getattr(_STAGE_SINK, "stages", None),
+        getattr(_STAGE_SINK, "stages", None), **extra,
     )
 
 
@@ -2091,6 +2106,49 @@ STREAM_BRAIN_CALL = http_brain_call_stream if MVG_BRAIN == "http" else plugin_br
 # A thread-local rather than a new STREAM_BRAIN_CALL argument so every
 # existing override of that hook keeps its signature.
 _STAGE_SINK = threading.local()
+
+# Active brain call per node: {node_id: {"task_id", "target", "started", "cancel_event", "wake"}}.
+# A turn registers on entry and always removes its entry on exit (success, error, cancel).
+_ACTIVE_TASKS: dict = {}
+_ACTIVE_TASKS_LOCK = threading.Lock()
+
+
+def _register_task(node_id: str, target: str) -> dict:
+    task = {"task_id": uuid.uuid4().hex[:12], "target": target, "started": time.time(),
+            "cancel_event": threading.Event(), "wake": None}
+    with _ACTIVE_TASKS_LOCK:
+        _ACTIVE_TASKS[node_id or ""] = task
+    return task
+
+
+def _unregister_task(node_id: str, task: dict) -> None:
+    with _ACTIVE_TASKS_LOCK:
+        if _ACTIVE_TASKS.get(node_id or "") is task:
+            del _ACTIVE_TASKS[node_id or ""]
+
+
+def cancel_active_turn(node_id: str) -> str:
+    """Cancel the node's running brain turn. Returns "cancelled" (the plugin's
+    brain_cancel hook ran and returned truthy), "stopped_speech_only" (no hook,
+    or it returned falsy or raised: the turn stops speaking and drops the
+    result, the brain may still be running) or "no_active_turn" (nothing
+    running, or already cancelled)."""
+    with _ACTIVE_TASKS_LOCK:
+        task = _ACTIVE_TASKS.get(node_id or "")
+        if task is None or task["cancel_event"].is_set():
+            return "no_active_turn"
+        task["cancel_event"].set()
+        target, task_id, wake = task["target"], task["task_id"], task["wake"]
+    if wake is not None:
+        wake.set()
+    hook = _plugin_brain_cancel
+    if hook is None:
+        return "stopped_speech_only"
+    try:
+        return "cancelled" if hook(target, task_id) else "stopped_speech_only"
+    except Exception as exc:
+        log_fallback(f"brain_cancel_failed:{str(exc)[:200]}", tts_engine="cancel-skip")
+        return "stopped_speech_only"
 
 APOLOGY = f"{_display_name(AGENT_NAME)} is busy right now, try again in a moment."
 
@@ -3182,8 +3240,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return claimed[:64], False
         return "", True
 
-    def _stream_brain_turn(self, *, t0, turn_id, prompt, session_id, node_id, speaker,
-                           speaker_score, ctx, endpoint, opts, log_extra=None):
+    def _stream_brain_turn(self, *, node_id, ctx, **kw):
+        """Registers the turn as the node's active task (for cancel_active_turn)
+        and always removes it on the way out."""
+        task = _register_task(node_id, ctx.get("target") or resolve_target(node_id))
+        ctx["task_id"] = task["task_id"]
+        try:
+            return GatewayHandler._stream_brain_turn_inner(self, node_id=node_id, ctx=ctx, task=task, **kw)
+        finally:
+            _unregister_task(node_id, task)
+
+    def _stream_brain_turn_inner(self, *, t0, turn_id, prompt, session_id, node_id, speaker,
+                                 speaker_score, ctx, endpoint, opts, task, log_extra=None):
         """The shared brain -> sentence-TTS stream behind /ask/stream and
         /voice/turn: brain call, sentence cutting, TTS/gap-fill, `status`
         keepalives, then `reply` + `done`. The caller has already sent the
@@ -3198,6 +3266,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         segmenter = SentenceSegmenter(early_first=FIRST_CLAUSE_EARLY)
         wake = threading.Event()  # set when a sentence is queued or the brain finishes
+        task["wake"] = wake
+        cancel_event = task["cancel_event"]  # set by cancel_active_turn: stop speaking, drop the result
         spoken_text = ""  # stripped reply text already fed to the segmenter
         raw_seen = ""
         md_pending = ""
@@ -3253,6 +3323,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             hub-dialect `audio_chunk` the room ear plays from. False = client gone.
             A gap-fill clip (`filler`) is not the answer, so it does not move the
             turn to `speaking`."""
+            if cancel_event.is_set():
+                return True  # cancelled: nothing more reaches the client
             if not event.get("filler") and not _mark_speaking():
                 return False
             if not self._sse("sentence", event):
@@ -3281,7 +3353,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             timing["play_end"] = start + nbytes / (AUDIO_TARGET_RATE * 2.0)
 
         def _submit(sentence_text: str) -> None:
-            if not sentence_text.strip():
+            if not sentence_text.strip() or cancel_event.is_set():
                 return
             timing["sentences"] += 1
             if timing["first_sentence_ms"] is None:
@@ -3561,6 +3633,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if fast["intent"]:  # matched but the handler failed: still a brain turn
                     intent_rec["intent_fallthrough"] = f"{fast['intent']}:{fast['reason']}"
                 call_kwargs = {}
+                if ctx.get("task_id"):
+                    call_kwargs["task_id"] = ctx["task_id"]
                 enable_vision = is_vision_enabled()
                 if enable_vision:
                     if ctx.get("image_b64"):
@@ -3613,6 +3687,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             while True:
                 with lock:
                     available = len(futures)
+                if cancel_event.is_set():
+                    return available  # cancelled: skip whatever is still queued
                 if next_idx >= available:
                     return next_idx
                 fut = futures[next_idx]
@@ -3652,7 +3728,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         idx = 0
         client_gone = False
         last_status = time.time()
-        while not done_event.is_set():
+        while not done_event.is_set() and not cancel_event.is_set():
             wake.clear()
             idx = _drain_ready(idx)
             if idx is None:
@@ -3681,7 +3757,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             _finish("error:client_gone")
             return ("error:client_gone", "")
 
-        if "error" in result_box:
+        if cancel_event.is_set():
+            outcome = "cancelled"
+            reply = ""
+        elif "error" in result_box:
             outcome = "error:brain_exception"
             reply = APOLOGY
             _submit(reply)

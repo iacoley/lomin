@@ -37,6 +37,7 @@ Every hook is optional:
 - `apply_defaults()` — fill env defaults with `setdefault` before config reads them.
 - `brain_call(target, prompt, timeout) -> str` — the agent answers one framed prompt.
 - `brain_call_stream(target, prompt, timeout, on_partial, stages_out) -> str` — streaming brain.
+- `brain_cancel(target, task_id) -> bool` — abort a running brain call; `cancel_active_turn(node_id)` in `gateway.py` uses it.
 - `classify` — a module with `classify_choice(...)` (the addressee classifier).
 - `try_intent(text) -> dict | None` — deterministic fast path.
 - `AMBIENT_ADDRESSED` — a string: the option key the addressee classifier answers with (default `addressed_to_agent`).
