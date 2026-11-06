@@ -140,6 +140,14 @@ def handshake_response(client_key: str) -> bytes:
             f"Sec-WebSocket-Accept: {accept_key(client_key)}\r\n\r\n").encode()
 
 
+def _fallback(ws, reason: str) -> None:
+    """Tell the client to continue on the request/response pipeline. Best effort."""
+    try:
+        ws.send_json({"event": "fallback", "endpoint": "/voice/turn", "reason": str(reason)[:200]})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_live_session(ws: WSConn, session_factory, *, max_sec=None, idle_sec=None) -> str:
     """Bridge a WSConn to a LiveSession until it ends. session_factory(send_to_client)
     returns an unopened LiveSession. Returns the outcome string for the log."""
@@ -157,7 +165,13 @@ def run_live_session(ws: WSConn, session_factory, *, max_sec=None, idle_sec=None
         loop = asyncio.get_running_loop()
         inbox: asyncio.Queue = asyncio.Queue()
         session = session_factory(to_client)
-        await session.open()
+        try:
+            await session.open()
+        except Exception as exc:  # noqa: BLE001
+            _fallback(ws, f"open_failed: {type(exc).__name__}")
+            outcome.update(v="error:open_failed", code=CLOSE_ERROR)
+            await session.close()
+            return
         ws.sock.settimeout(idle_sec)
 
         def post(m):
@@ -195,6 +209,7 @@ def run_live_session(ws: WSConn, session_factory, *, max_sec=None, idle_sec=None
                 if events in done and getter not in done:
                     getter.cancel()
                     if session.error:
+                        _fallback(ws, session.error)
                         outcome.update(v="error:backend", code=CLOSE_ERROR)
                     return
                 m = getter.result()

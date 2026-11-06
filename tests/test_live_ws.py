@@ -185,6 +185,9 @@ def test_backend_error_closes_1011_with_error_event(server, monkeypatch):
     op, payload = c.recv()
     assert op == live_ws.OP_TEXT and json.loads(payload)["event"] == "error"
     op, payload = c.recv()
+    fb = json.loads(payload)
+    assert op == live_ws.OP_TEXT and fb["event"] == "fallback" and fb["endpoint"] == "/voice/turn"
+    op, payload = c.recv()
     assert op == live_ws.OP_CLOSE and struct.unpack(">H", payload[:2])[0] == 1011
 
 
@@ -196,3 +199,19 @@ def test_unmasked_frame_rejected():
             return d
     with pytest.raises(ConnectionError):
         live_ws.WSConn(S(), 100).recv()
+
+
+class OpenFailBackend(tb.MockBackend):
+    async def open(self, config):
+        raise ConnectionError("no route")
+
+
+def test_open_failure_sends_fallback_then_1011(server, monkeypatch):
+    monkeypatch.setenv("MVG_TALKER_BACKENDS", "openfail=test_live_ws:OpenFailBackend")
+    monkeypatch.setenv("MVG_TALKER_BACKEND", "openfail")
+    c = Client(server)
+    op, payload = c.recv()
+    fb = json.loads(payload)
+    assert fb["event"] == "fallback" and "open_failed" in fb["reason"]
+    op, payload = c.recv()
+    assert op == live_ws.OP_CLOSE and struct.unpack(">H", payload[:2])[0] == 1011
