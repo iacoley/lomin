@@ -32,7 +32,9 @@ MVG_BRAIN=http MVG_BRAIN_URL=http://127.0.0.1:8000/brain python3 gateway.py
 | `AMBIENT_LAYA_QUESTION`, `VOICE_ADDRESSED_INSTRUCTIONS` | `str` | replace the addressee classifier's wording, for a site whose classifier was tuned on its own text |
 | `AMBIENT_ADDRESSED` | `str` | the option key the addressee classifier answers with; default `addressed_to_agent` |
 
-**Cancel.** Each `/voice/turn` and `/ask/stream` brain call gets a 12-character `task_id` and is registered as its node's active task until it ends (success, error or cancel). `gateway.cancel_active_turn(node_id)` returns `"cancelled"` (the `brain_cancel` hook ran and returned truthy), `"stopped_speech_only"` (no hook, or it returned falsy or raised: the turn stops synthesising, drops the result and ends with outcome `cancelled`) or `"no_active_turn"` (nothing running, or already cancelled). Nothing calls it yet; spoken cancel is a later change.
+**Cancel.** Each `/voice/turn` and `/ask/stream` brain call gets a 12-character `task_id` and is registered as its node's active task until it ends (success, error or cancel). `gateway.cancel_active_turn(node_id)` returns `"cancelled"` (the `brain_cancel` hook ran and returned truthy), `"stopped_speech_only"` (no hook, or it returned falsy or raised: the turn stops synthesising, drops the result and ends with outcome `cancelled`) or `"no_active_turn"` (nothing running, or already cancelled). With `MVG_SPOKEN_CANCEL=1` a spoken cancel on `/voice/turn` calls it (see below).
+
+**Spoken cancel.** `MVG_SPOKEN_CANCEL=1` (default off): after STT on `/voice/turn`, a transcript that is exactly one of the cancel phrases (`stop`, `cancel`, `cancel that`, `never mind`, `nevermind`, `stop that`; override with the comma list `MVG_CANCEL_PHRASES`) or at most 3 words starting with `stop` or `cancel` calls `cancel_active_turn(node_id)`. The reply is a fixed, normally synthesised acknowledgement: `Cancelled.` or `Stopped talking, but the task may still be running.`. With no active turn the transcript is an ordinary turn. Matching is whole-utterance, never a substring, so "stop the deploy script from restarting" goes to the brain. The turn record carries `intent: "cancel"`.
 
 Without `brain_call`, `MVG_BRAIN` defaults to `http`. A plugin that fails to import prints `lomin: plugin '<name>' failed to load (<error>); running without it` on stderr and the gateway runs without it. Site code lives in a plugin, never in this repo.
 
@@ -210,6 +212,8 @@ Every variable below is also listed, commented, in `.env.example`. Secrets have 
 | `MVG_TTS_STREAM` | `1` — `/ask/stream` sends sub-sentence pcm `sentence` events (format=pcm, 24 kHz mono, text on the first chunk of each sentence only) read from the desktop `POST /tts/stream`; `0` = whole-sentence WAV events. Logs `first_audio_ms`/`tts_first_ms` |
 | `MVG_DESKTOP_TTS_STREAM_URL` | derived: `MVG_DESKTOP_TTS_URL` + `/stream` |
 | `MVG_TTS_STREAM_MIN_CHUNK_BYTES` | `4800` (~100 ms, the hub's own forwarding floor) |
+| `MVG_SPOKEN_CANCEL` | `0` — `1` makes a spoken "stop" / "cancel that" on `/voice/turn` cancel the running turn (see Cancel) |
+| `MVG_CANCEL_PHRASES` | `stop,cancel,cancel that,never mind,nevermind,stop that` — comma list of exact cancel phrases |
 | `MVG_GAP_FILL` | `1` — filler clips while the brain is silent, pcm stream mode only (see "Gap-fill and latency metrics"); `0` disables |
 | `MVG_GAP_FILL_DIR` | `<gateway dir>/gap-fill` |
 | `MVG_GAP_FILL_AFTER_MS` | `1200` — no real audio by this long after request start: emit one acknowledge/thinking clip |
