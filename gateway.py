@@ -226,7 +226,9 @@ from pending_and_auth import (  # noqa: E402,F401
 # Every hook is optional:
 #   apply_defaults() -> None                     fill env defaults (setdefault only)
 #   brain_call(target, prompt, timeout) -> str   the agent answers one framed prompt
-#   brain_call_stream(target, prompt, timeout, on_partial, stages_out) -> str
+#   brain_call_stream(target, prompt, timeout, on_partial, stages_out[, audio_clips=]) -> str
+#                                                 audio_clips: list of 16 kHz WAV bytes, passed only
+#                                                 if the signature accepts it and MVG_SPLICE_RAW_AUDIO=1
 #   classify                                      module with classify_choice(...) (addressee classifier)
 #   try_intent(text) -> dict | None               deterministic fast path
 PLUGIN_NAME = os.environ.get("MVG_PLUGIN", "").strip()
@@ -1867,7 +1869,7 @@ def make_frame_ctx(voice_id: dict | None, claimed_speaker: str = "", open_room: 
                    reply_cap_words: int = 60, enrolled: str | None = None,
                    device: str = "", medium: str = "", target: str = "",
                    image_b64: str | None = None, burst_images_b64: list[str] | None = None,
-                   audio_b64: str | None = None) -> dict:
+                   audio_b64: str | None = None, audio_clips: list[bytes] | None = None) -> dict:
     ctx = {"enrolled": enrolled, "voice_id": voice_id or {"status": "unavailable", "id": "", "score": 0.0},
            "claimed_speaker": claimed_speaker or "", "open_room": bool(open_room),
            "reply_cap_words": reply_cap_words, "device": device or "", "medium": medium or "",
@@ -1878,7 +1880,32 @@ def make_frame_ctx(voice_id: dict | None, claimed_speaker: str = "", open_room: 
         ctx["burst_images_b64"] = burst_images_b64
     if audio_b64:
         ctx["audio_b64"] = audio_b64
+    if audio_clips:
+        ctx["audio_clips"] = audio_clips
     return ctx
+
+
+def audio_clips_max_bytes() -> int:
+    try:
+        return max(0, int(os.environ.get("MVG_AUDIO_CLIPS_MAX_BYTES", str(2 * 1024 * 1024))))
+    except ValueError:
+        return 2 * 1024 * 1024
+
+
+def collect_audio_clips(wav_bytes: bytes | None) -> list[bytes] | None:
+    """The raw-audio clips handed to a plugin brain (`audio_clips`). None unless
+    MVG_SPLICE_RAW_AUDIO=1 and there is audio; over MVG_AUDIO_CLIPS_MAX_BYTES the
+    clips are dropped and the drop is logged, and the turn goes on without them."""
+    if os.environ.get("MVG_SPLICE_RAW_AUDIO", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    if not wav_bytes:
+        return None
+    clips = [bytes(wav_bytes)]
+    if sum(len(c) for c in clips) > audio_clips_max_bytes():
+        log_fallback("audio_clips_over_cap", tts_engine="audio-clips-skip",
+                     bytes=sum(len(c) for c in clips), cap=audio_clips_max_bytes())
+        return None
+    return clips
 
 
 # Orchestrator instruction (Mode 2, specs/2026-11-05-talker-thinker-live-architecture.md 6.7).
@@ -2089,8 +2116,19 @@ def http_brain_call_stream(prompt: str, session_id: str, node_id: str, speaker: 
 BRAIN_CALL = http_brain_call if MVG_BRAIN == "http" else plugin_brain_call
 
 
+def _accepts_kwarg(fn, name: str) -> bool:
+    """True if fn takes a keyword `name` (or **kwargs). Checked per call so a
+    patched hook is honoured; a signature that cannot be read counts as no."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (ValueError, TypeError):
+        return False
+    return name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def plugin_brain_call_stream(prompt: str, session_id: str, node_id: str, speaker: str,
-                             speaker_score, timeout: int, on_partial) -> str:
+                             speaker_score, timeout: int, on_partial,
+                             audio_clips: list[bytes] | None = None) -> str:
     """Streaming brain through the plugin. With a plugin brain_call_stream, that
     hook gets on_partial and the per-turn stage sink. Without one, the plugin's
     plain brain_call answers and on_partial fires once with the full reply."""
@@ -2099,9 +2137,12 @@ def plugin_brain_call_stream(prompt: str, session_id: str, node_id: str, speaker
         on_partial(reply)
         return reply
     wrapped = _frame_for_call(prompt, node_id, speaker, speaker_score)
+    extra = {}
+    if audio_clips is not None and _accepts_kwarg(_plugin_brain_call_stream, "audio_clips"):
+        extra["audio_clips"] = audio_clips
     return _plugin_brain_call_stream(
         _call_target(node_id), wrapped, timeout, on_partial,
-        getattr(_STAGE_SINK, "stages", None),
+        getattr(_STAGE_SINK, "stages", None), **extra,
     )
 
 
@@ -3717,6 +3758,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         call_kwargs["image_b64"] = ctx["image_b64"]
                     if ctx.get("burst_images_b64"):
                         call_kwargs["burst_images_b64"] = ctx["burst_images_b64"]
+                if ctx.get("audio_clips"):
+                    call_kwargs["audio_clips"] = ctx["audio_clips"]
                 brain_direct_audio = bool(BRAIN_DIRECT_AUDIO) or (os.environ.get("MVG_BRAIN_DIRECT_AUDIO", "0") == "1")
                 if brain_direct_audio:
                     if ctx.get("audio_b64"):
@@ -4241,7 +4284,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                              reply_cap_words=int(prof["reply_cap_words"]),
                              device=device, medium=medium, target=target,
                              image_b64=image_b64, burst_images_b64=burst_images_b64,
-                             audio_b64=audio_b64)
+                             audio_b64=audio_b64, audio_clips=collect_audio_clips(wav_bytes))
         target_extra = {"target_rejected": True} if (
             requested_target and requested_target != target) else {}
         self._stream_brain_turn(
