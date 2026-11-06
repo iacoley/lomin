@@ -64,8 +64,10 @@ def validate_tool_args(name: str, args: Any) -> str | None:
 
 class LiveSession:
     def __init__(self, backend, config: dict, send_to_client: Callable, brain_call: Callable,
-                 cancel_turn: Callable | None = None):
+                 cancel_turn: Callable | None = None, speak: Callable | None = None):
         self.backend = backend
+        # speak(text) -> WAV bytes (the gateway TTS chain). Used for text-out replies.
+        self._speak = speak
         self.config = dict(config or {})
         self.node_id = str(self.config.get("node_id") or "")
         self._send_to_client = send_to_client
@@ -129,6 +131,9 @@ class LiveSession:
         if kind == "tool_call":
             result = await self._handle_tool(ev.get("name"), ev.get("args"))
             await self.backend.send_tool_result(str(ev.get("call_id") or ""), result)
+        elif kind == "text" and self._speak is not None and not ev.get("spoken"):
+            await self._client(ev)
+            await self._speak_text(str(ev.get("text") or ""))
         elif kind in ("audio", "text", "interrupted", "turn_end"):
             await self._client(ev)
         elif kind == "error":
@@ -136,6 +141,24 @@ class LiveSession:
             await self._client({"type": "error", "message": self.error})
             return False
         return True
+
+    async def _speak_text(self, text: str) -> None:
+        """Synthesize a text-out reply and send it as audio. TTS failure is reported to
+        the client as a non-fatal event; the text frame was already delivered."""
+        if not text.strip():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            wav = await loop.run_in_executor(None, self._speak, text)
+            import audio_utils
+            import tts_backends
+            wav = audio_utils.normalize_wav(wav, target_rate=24000)
+            pcm = tts_backends.extract_pcm_from_wav_or_raw(wav)
+        except Exception as exc:  # noqa: BLE001
+            await self._client({"type": "tts_error", "message": str(exc)[:200]})
+            return
+        if pcm and not self._closed:
+            await self._client({"type": "audio", "pcm": pcm, "rate": 24000, "synthesized": True})
 
     # -- tools --
 

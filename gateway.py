@@ -4137,7 +4137,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
         def factory(send_to_client):
             return live_harness.LiveSession(
                 backend_cls(), {"node_id": node_id, "target": target}, send_to_client, brain,
-                getattr(sys.modules[__name__], "cancel_active_turn", None))
+                getattr(sys.modules[__name__], "cancel_active_turn", None),
+                lambda text: synthesize(text)[0])
         outcome = live_ws.run_live_session(ws, factory)
         log_request("/voice/live", (time.time() - t0) * 1000, outcome, node=node_id, backend=backend_name)
 
