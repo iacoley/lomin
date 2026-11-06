@@ -65,3 +65,5 @@ domains. The PR checklist lists the exact commands.
 - Config is env-driven. Every new env var goes in the README config table and in `.env.example`.
 - Log lines are JSON, one per request, with no audio bytes and no keys.
 - A failing plugin is loud (stderr), never silent.
+- `MVG_SPOKEN_PROGRESS=1` (+ `MVG_PROGRESS_*`): spoken progress from `stages_out["events"]` (`ProgressNarrator`); tests in `tests/test_spoken_progress.py`.
+- `MVG_CONTEXT_OPENER=1`: opener from the first stage event (`_maybe_context_opener`); tests in `tests/test_context_opener.py`.
