@@ -25,12 +25,15 @@ MVG_BRAIN=http MVG_BRAIN_URL=http://127.0.0.1:8000/brain python3 gateway.py
 |---|---|---|
 | `apply_defaults()` | `-> None` | fill env defaults (`setdefault` only) before the config reads them |
 | `brain_call(target, prompt, timeout)` | `-> str` | the agent answers one framed prompt |
+| `brain_call_stream(target, prompt, timeout, on_partial, stages_out)` | `-> str` | streaming brain: call `on_partial(text_so_far)` as the reply grows. If its signature also takes `task_id` (or `**kwargs`) it gets the turn's task id, the same one `brain_cancel` is called with |
+| `brain_cancel(target, task_id)` | `-> bool` | optional: abort the running brain call with that task id; truthy = it was stopped. Without it, or if it returns falsy or raises, a cancel stops speech and drops the result but cannot stop the brain |
 | `brain_call_stream(target, prompt, timeout, on_partial, stages_out)` | `-> str` | streaming brain: call `on_partial(text_so_far)` as the reply grows. If the signature also takes `audio_clips` (or `**kwargs`) and `MVG_SPLICE_RAW_AUDIO=1`, it gets `audio_clips=[wav_bytes, ...]`: the turn's 16 kHz WAV, so a multimodal brain can hear the original audio. A hook without it is called exactly as before |
 | `classify` | module with `classify_choice(...)` | addressee classifier for `/ambient` and open rooms |
 | `try_intent(text)` | `-> dict \| None` | deterministic fast path; see "Fast path" below |
 | `AMBIENT_LAYA_QUESTION`, `VOICE_ADDRESSED_INSTRUCTIONS` | `str` | replace the addressee classifier's wording, for a site whose classifier was tuned on its own text |
 | `AMBIENT_ADDRESSED` | `str` | the option key the addressee classifier answers with; default `addressed_to_agent` |
 
+**Cancel.** Each `/voice/turn` and `/ask/stream` brain call gets a 12-character `task_id` and is registered as its node's active task until it ends (success, error or cancel). `gateway.cancel_active_turn(node_id)` returns `"cancelled"` (the `brain_cancel` hook ran and returned truthy), `"stopped_speech_only"` (no hook, or it returned falsy or raised: the turn stops synthesising, drops the result and ends with outcome `cancelled`) or `"no_active_turn"` (nothing running, or already cancelled). Nothing calls it yet; spoken cancel is a later change.
 **Stage events.** What a plugin puts in `stages_out` for progress consumers has this shape, one dict per event:
 
 ```json
