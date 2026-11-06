@@ -209,6 +209,9 @@ Every variable below is also listed, commented, in `.env.example`. Secrets have 
 | `MVG_TTS_STREAM_MIN_CHUNK_BYTES` | `4800` (~100 ms, the hub's own forwarding floor) |
 | `MVG_GAP_FILL` | `1` — filler clips while the brain is silent, pcm stream mode only (see "Gap-fill and latency metrics"); `0` disables |
 | `MVG_GAP_FILL_DIR` | `<gateway dir>/gap-fill` |
+| `MVG_ORCHESTRATOR_PROMPT` | `0` — `1` appends a generic voice-orchestrator instruction (speak one sentence, then delegate to a subagent) to every framed brain prompt; turn records in `voice-latency.jsonl` carry `orchestrator` so runs with it on and off can be compared |
+| `MVG_ORCHESTRATOR_TEXT` | built-in text — a site's own instruction block, replacing the default |
+| `MVG_ORCHESTRATOR_TARGETS` | empty (all targets) — comma list of brain targets that get the block |
 | `MVG_GAP_FILL_AFTER_MS` | `1200` — no real audio by this long after request start: emit one acknowledge/thinking clip |
 | `MVG_GAP_FILL_LONG_MS` | `5000` — silence (audio already sent has finished playing) longer than this while the brain still works: emit one long_wait clip, at most one per turn |
 | `MVG_TEXT_SENTENCES` | `0` — `1` makes `/ask/stream` send text-only `sentence` events (no `audio_b64`) and makes `/v1/audio/speech` stream (44-byte WAV header with unknown sizes, then 24 kHz mono PCM as synthesized; `"stream": false` in the request keeps the complete-WAV reply). For a hub's native streaming TTS client. Gap-fill is disabled in this mode: the hub latches a turn to brain-audio or remote-tts and rejects a mix, and a clip is audio |
