@@ -227,6 +227,7 @@ Every variable below is also listed, commented, in `.env.example`. Secrets have 
 | `MVG_TTS_STREAM_MIN_CHUNK_BYTES` | `4800` (~100 ms, the hub's own forwarding floor) |
 | `MVG_TALKER_BACKENDS` | unset — comma list of `name=module:Class` plugin Talker backends for live voice (see `talker_backend.py`) |
 | `MVG_TALKER_BACKEND` | unset — name of the Talker backend for `/voice/live` (or `talker_backend` in a node's `nodes.json` entry); unset means `/voice/live` answers 501 |
+| `MVG_GEMINI_API_KEY` / `MVG_GEMINI_MODEL` / `MVG_GEMINI_VOICE` / `MVG_GEMINI_INSTRUCTIONS` / `MVG_GEMINI_URL` | unset / `gemini-2.5-flash-native-audio-preview` / unset / unset / Google endpoint — settings for the built-in `gemini` Talker backend (`MVG_TALKER_BACKEND=gemini`, `gemini_live.py`); the key is required, `MVG_GEMINI_URL` overrides the endpoint |
 | `MVG_LIVE_MAX_SEC` / `MVG_LIVE_IDLE_SEC` / `MVG_LIVE_MAX_FRAME` | `600` / `30` / `262144` — session length, idle timeout (seconds) and largest client frame (bytes) for `/voice/live` |
 | `MVG_SPOKEN_CANCEL` | `0` — `1` makes a spoken "stop" / "cancel that" on `/voice/turn` cancel the running turn (see Cancel) |
 | `MVG_CANCEL_PHRASES` | `stop,cancel,cancel that,never mind,nevermind,stop that` — comma list of exact cancel phrases |
