@@ -2297,6 +2297,43 @@ class ProgressNarrator:
 APOLOGY = f"{_display_name(AGENT_NAME)} is busy right now, try again in a moment."
 
 
+# --- Spoken cancel (MVG_SPOKEN_CANCEL=1) -------------------------------------
+
+_DEFAULT_CANCEL_PHRASES = ("stop", "cancel", "cancel that", "never mind", "nevermind", "stop that")
+_CANCEL_ACKS = {
+    "cancelled": "Cancelled.",
+    "stopped_speech_only": "Stopped talking, but the task may still be running.",
+}
+
+
+def _cancel_phrases() -> frozenset:
+    raw = os.environ.get("MVG_CANCEL_PHRASES", "")
+    items = [_norm_cancel_text(p) for p in raw.split(",")] if raw.strip() else list(_DEFAULT_CANCEL_PHRASES)
+    return frozenset(p for p in items if p)
+
+
+def _norm_cancel_text(text: str) -> str:
+    cleaned = "".join(c if (c.isalnum() or c.isspace() or c == "'") else " " for c in (text or "").lower())
+    return " ".join(cleaned.replace("'", "").split())
+
+
+def is_cancel_phrase(text: str) -> bool:
+    """True when the transcript is a spoken cancel: an exact match on the phrase
+    set, or at most 3 words starting with "stop" or "cancel". Never a substring
+    match, so "stop the deploy script from restarting" is not a cancel."""
+    norm = _norm_cancel_text(text)
+    if not norm:
+        return False
+    if norm in _cancel_phrases():
+        return True
+    words = norm.split()
+    return len(words) <= 3 and words[0] in ("stop", "cancel")
+
+
+def spoken_cancel_enabled() -> bool:
+    return os.environ.get("MVG_SPOKEN_CANCEL", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
 # --- TTS ---------------------------------------------------------------------
 
 def _load_json(path: Path) -> dict:
@@ -4355,11 +4392,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
                              audio_b64=audio_b64, audio_clips=collect_audio_clips(wav_bytes))
         target_extra = {"target_rejected": True} if (
             requested_target and requested_target != target) else {}
+        turn_opts = {"voice": True, "tts": tts, "gap_fill": bool(prof["gap_fill"]),
+                     "audio_chunk": audio_chunk}
+        if spoken_cancel_enabled() and is_cancel_phrase(transcript):
+            # Cancel the node's running turn first; the acknowledgement then runs as
+            # a fixed-reply turn. No running turn: fall through as an ordinary turn.
+            cancel_result = cancel_active_turn(node_id)
+            ack = _CANCEL_ACKS.get(cancel_result)
+            if ack:
+                turn_opts["intent_result"] = {"hit": True, "intent": "cancel", "match_ms": 0.0,
+                                              "handler_ms": 0.0, "reply": ack, "reason": "spoken_cancel"}
+                turn_opts["gap_fill"] = False
         self._stream_brain_turn(
             t0=t0, turn_id=turn_id, prompt=transcript, session_id=session_id, node_id=node_id,
             speaker=speaker_id, speaker_score=vid.get("score"), ctx=ctx, endpoint="/voice/turn",
-            opts={"voice": True, "tts": tts, "gap_fill": bool(prof["gap_fill"]),
-                  "audio_chunk": audio_chunk},
+            opts=turn_opts,
             log_extra={**log_extra, **id_extra, "target": target, **target_extra})
 
     # -- /v1/audio/speech --
