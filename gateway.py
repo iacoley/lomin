@@ -226,7 +226,9 @@ from pending_and_auth import (  # noqa: E402,F401
 # Every hook is optional:
 #   apply_defaults() -> None                     fill env defaults (setdefault only)
 #   brain_call(target, prompt, timeout) -> str   the agent answers one framed prompt
-#   brain_call_stream(target, prompt, timeout, on_partial, stages_out) -> str
+#   brain_call_stream(target, prompt, timeout, on_partial, stages_out[, audio_clips=]) -> str
+#                                                 audio_clips: list of 16 kHz WAV bytes, passed only
+#                                                 if the signature accepts it and MVG_SPLICE_RAW_AUDIO=1
 #   classify                                      module with classify_choice(...) (addressee classifier)
 #   try_intent(text) -> dict | None               deterministic fast path
 PLUGIN_NAME = os.environ.get("MVG_PLUGIN", "").strip()
@@ -1868,7 +1870,7 @@ def make_frame_ctx(voice_id: dict | None, claimed_speaker: str = "", open_room: 
                    reply_cap_words: int = 60, enrolled: str | None = None,
                    device: str = "", medium: str = "", target: str = "",
                    image_b64: str | None = None, burst_images_b64: list[str] | None = None,
-                   audio_b64: str | None = None) -> dict:
+                   audio_b64: str | None = None, audio_clips: list[bytes] | None = None) -> dict:
     ctx = {"enrolled": enrolled, "voice_id": voice_id or {"status": "unavailable", "id": "", "score": 0.0},
            "claimed_speaker": claimed_speaker or "", "open_room": bool(open_room),
            "reply_cap_words": reply_cap_words, "device": device or "", "medium": medium or "",
@@ -1879,7 +1881,50 @@ def make_frame_ctx(voice_id: dict | None, claimed_speaker: str = "", open_room: 
         ctx["burst_images_b64"] = burst_images_b64
     if audio_b64:
         ctx["audio_b64"] = audio_b64
+    if audio_clips:
+        ctx["audio_clips"] = audio_clips
     return ctx
+
+
+def audio_clips_max_bytes() -> int:
+    try:
+        return max(0, int(os.environ.get("MVG_AUDIO_CLIPS_MAX_BYTES", str(2 * 1024 * 1024))))
+    except ValueError:
+        return 2 * 1024 * 1024
+
+
+def collect_audio_clips(wav_bytes: bytes | None) -> list[bytes] | None:
+    """The raw-audio clips handed to a plugin brain (`audio_clips`). None unless
+    MVG_SPLICE_RAW_AUDIO=1 and there is audio; over MVG_AUDIO_CLIPS_MAX_BYTES the
+    clips are dropped and the drop is logged, and the turn goes on without them."""
+    if os.environ.get("MVG_SPLICE_RAW_AUDIO", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    if not wav_bytes:
+        return None
+    clips = [bytes(wav_bytes)]
+    if sum(len(c) for c in clips) > audio_clips_max_bytes():
+        log_fallback("audio_clips_over_cap", tts_engine="audio-clips-skip",
+                     bytes=sum(len(c) for c in clips), cap=audio_clips_max_bytes())
+        return None
+    return clips
+
+
+# Orchestrator instruction (Mode 2, specs/2026-11-05-talker-thinker-live-architecture.md 6.7).
+# Generic on purpose: no tool, agent or household names. A site adds its own half
+# with MVG_ORCHESTRATOR_TEXT. Off unless MVG_ORCHESTRATOR_PROMPT=1; MVG_ORCHESTRATOR_TARGETS
+# (comma list) limits it to those brain targets.
+ORCHESTRATOR_TEXT = ("You are the voice orchestrator. Speak one specific sentence first, then delegate. "
+                     "Do not do the work yourself: hand it to a subagent and choose that subagent's "
+                     "model and effort for the task. If a follow-up arrives while a task runs, say so "
+                     "and do not start a second task silently. Progress lines come from the harness: "
+                     "do not invent progress.")
+
+
+def orchestrator_enabled(target: str = "") -> bool:
+    if os.environ.get("MVG_ORCHESTRATOR_PROMPT", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    only = [t.strip() for t in os.environ.get("MVG_ORCHESTRATOR_TARGETS", "").split(",") if t.strip()]
+    return not only or target in only
 
 
 def _display_name(name: str) -> str:
@@ -1909,7 +1954,10 @@ def frame_voice_prompt(prompt: str, node_id: str, ctx: dict) -> str:
     if ctx.get("open_room"):
         bits.append("open room")
     cap = ctx.get("reply_cap_words") or 60
-    return f"[{' · '.join(bits)}] {prompt}\n\n" + SPOKEN_SUFFIX.format(n=cap) + " " + SECURITY_SUFFIX
+    tail = SPOKEN_SUFFIX.format(n=cap) + " " + SECURITY_SUFFIX
+    if orchestrator_enabled(ctx.get("target") or ""):
+        tail += " " + (os.environ.get("MVG_ORCHESTRATOR_TEXT", "").strip() or ORCHESTRATOR_TEXT)
+    return f"[{' · '.join(bits)}] {prompt}\n\n" + tail
 
 
 # Per-thread framing context for the brain worker thread (same pattern as
@@ -2081,7 +2129,8 @@ def _accepts_kwarg(fn, name: str) -> bool:
 
 def plugin_brain_call_stream(prompt: str, session_id: str, node_id: str, speaker: str,
                              speaker_score, timeout: int, on_partial,
-                             task_id: str | None = None) -> str:
+                             task_id: str | None = None,
+                             audio_clips: list[bytes] | None = None) -> str:
     """Streaming brain through the plugin. With a plugin brain_call_stream, that
     hook gets on_partial and the per-turn stage sink. Without one, the plugin's
     plain brain_call answers and on_partial fires once with the full reply."""
@@ -2093,6 +2142,8 @@ def plugin_brain_call_stream(prompt: str, session_id: str, node_id: str, speaker
     extra = {}
     if task_id is not None and _accepts_kwarg(_plugin_brain_call_stream, "task_id"):
         extra["task_id"] = task_id
+    if audio_clips is not None and _accepts_kwarg(_plugin_brain_call_stream, "audio_clips"):
+        extra["audio_clips"] = audio_clips
     return _plugin_brain_call_stream(
         _call_target(node_id), wrapped, timeout, on_partial,
         getattr(_STAGE_SINK, "stages", None), **extra,
@@ -2149,6 +2200,99 @@ def cancel_active_turn(node_id: str) -> str:
     except Exception as exc:
         log_fallback(f"brain_cancel_failed:{str(exc)[:200]}", tts_engine="cancel-skip")
         return "stopped_speech_only"
+
+STAGE_DETAIL_MAX = 120
+
+
+def normalize_stage_event(raw) -> dict | None:
+    """Normalise a brain stage event to `{"stage": str, "detail": str, "t": float}`.
+
+    For consumers of stage events (progress narration); it does not touch what
+    is written to the turn record's `stages`. Accepts a dict with `stage` (or
+    `name` / `event`), optional `detail` (or `message` / `text`), optional `t`
+    in seconds (or `t_s`, or `t_ms` / `ms` in milliseconds). Missing detail
+    becomes "", missing or bad `t` becomes 0.0, `detail` is cut to
+    STAGE_DETAIL_MAX characters. Anything that is not a dict, or has no usable
+    stage name, gives None."""
+    if not isinstance(raw, dict):
+        return None
+    stage = ""
+    for key in ("stage", "name", "event"):
+        v = raw.get(key)
+        if isinstance(v, str) and v.strip():
+            stage = v.strip()
+            break
+    if not stage:
+        return None
+    detail = ""
+    for key in ("detail", "message", "text"):
+        v = raw.get(key)
+        if isinstance(v, str) and v.strip():
+            detail = " ".join(v.split())[:STAGE_DETAIL_MAX]
+            break
+    t = 0.0
+    for key, scale in (("t", 1.0), ("t_s", 1.0), ("t_ms", 0.001), ("ms", 0.001)):
+        v = raw.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+            t = float(v) * scale
+            break
+    return {"stage": stage, "detail": detail, "t": t}
+
+
+# --- Spoken progress (MVG_SPOKEN_PROGRESS=1) ----------------------------------
+
+def context_opener_enabled() -> bool:
+    return os.environ.get("MVG_CONTEXT_OPENER", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def spoken_progress_enabled() -> bool:
+    return os.environ.get("MVG_SPOKEN_PROGRESS", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _env_num(name: str, default, cast):
+    try:
+        return cast(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return cast(default)
+
+
+class ProgressNarrator:
+    """Decides when a stage event becomes one spoken progress line. Pure: the
+    caller supplies the clock and the playback / reply state. A line is allowed
+    only when nothing is playing, the real reply has not started, the event's
+    stage is allowlisted, at least min_gap seconds have passed since the last
+    line, and fewer than max_lines have been spoken. The newest unseen eligible
+    event wins; older unseen ones are dropped, never queued."""
+
+    def __init__(self, events_source, clock=time.time, min_gap=None, max_lines=None, allow=None):
+        self.source = events_source  # callable -> list of raw events
+        self.clock = clock
+        self.min_gap = min_gap if min_gap is not None else _env_num("MVG_PROGRESS_MIN_GAP_SEC", "12", float)
+        self.max_lines = max_lines if max_lines is not None else _env_num("MVG_PROGRESS_MAX_PER_TURN", "3", int)
+        raw = os.environ.get("MVG_PROGRESS_STAGES", "tool_start,milestone")
+        self.allow = frozenset(allow if allow is not None else (x.strip() for x in raw.split(",") if x.strip()))
+        self.seen = 0
+        self.lines = 0
+        self.last_spoken = None
+
+    def next_line(self, playing: bool, reply_started: bool):
+        try:
+            events = list(self.source() or [])
+        except Exception:
+            return None
+        fresh, self.seen = events[self.seen:], len(events)
+        if reply_started or playing or self.lines >= self.max_lines:
+            return None
+        now = self.clock()
+        if self.last_spoken is not None and now - self.last_spoken < self.min_gap:
+            return None
+        for raw in reversed(fresh):
+            ev = normalize_stage_event(raw)
+            if ev and ev["stage"] in self.allow and ev["detail"]:
+                self.lines += 1
+                self.last_spoken = now
+                return ev["detail"]
+        return None
 
 APOLOGY = f"{_display_name(AGENT_NAME)} is busy right now, try again in a moment."
 
@@ -3414,10 +3558,40 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return {"tts_stream": False, "text_sentences": text_mode, "turn_id": turn_id}
             return {"tts_stream": True, "first_audio_ms": timing["first_audio_ms"],
                     "tts_first_ms": timing["tts_first_ms"], "audio_chunks": timing["chunks"],
-                    "turn_id": turn_id, "gap_fill": list(gap["used"])}
+                    "turn_id": turn_id, "gap_fill": list(gap["used"]),
+                    "progress_lines": progress.lines if progress else 0}
 
         reply = ""
         stages: dict = {}
+        # Spoken progress (MVG_SPOKEN_PROGRESS): pcm stream mode only, never on a
+        # fixed-reply (intent) turn. Events come from stages["events"].
+        progress = (ProgressNarrator(lambda: stages.get("events"))
+                    if spoken_progress_enabled() and stream_mode and not opts.get("intent_result")
+                    else None)
+        # Context opener (MVG_CONTEXT_OPENER): one specific line from the first
+        # stage event in place of the generic opener clip. pcm stream mode only.
+        opener = {"on": context_opener_enabled() and stream_mode and not opts.get("intent_result"),
+                  "kind": None, "ms": None}
+
+        def _maybe_context_opener() -> None:
+            if not opener["on"] or opener["kind"] is not None:
+                return
+            if raw_seen or timing["first_audio_ms"] is not None or timing["sentences"]:
+                opener["on"] = False  # the real reply (or other speech) got there first
+                return
+            events = stages.get("events")
+            if not events:
+                return
+            ev = normalize_stage_event(events[0])
+            opener["on"] = False  # decided by the first event, once
+            if not ev or not ev["detail"] or len(ev["detail"]) > STAGE_DETAIL_MAX:
+                return
+            gap["open"] = True  # the generic opener clip must not also play
+            opener["kind"], opener["ms"] = "stage", _ms_since_start()
+            if progress is not None:
+                progress.seen, progress.last_spoken = 1, progress.clock()
+            _submit("One moment, " + ev["detail"])
+
         # LAMMAS per-turn record: intent name or "miss", match_ms, handler_ms.
         intent_rec: dict = {"intent": "miss", "intent_match_ms": None, "intent_handler_ms": None}
 
@@ -3434,11 +3608,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "brain_first_text_ms": timing["brain_first_text_ms"],
                 "first_sentence_ms": timing["first_sentence_ms"],
                 "gap_fill_first_ms": gap["first_ms"],
+                "orchestrator": orchestrator_enabled(target),
                 "tts_first_ms": timing["tts_first_ms"],
                 "first_audio_ms": timing["first_audio_ms"],
                 "last_audio_ms": timing["last_audio_ms"],
                 "total_ms": total_ms, "sentences": timing["sentences"],
                 "reply_chars": len(reply), "gap_fill": list(gap["used"]),
+                "progress_lines": progress.lines if progress else 0,
+                **({"opener_kind": opener["kind"] or ("gap_fill" if gap["used"] else "none"),
+                    "opener_ms": opener["ms"] if opener["kind"] else gap["first_ms"]}
+                   if context_opener_enabled() else {}),
                 "audio_s": round(timing["audio_bytes"] / (AUDIO_TARGET_RATE * 2.0), 3),
                 "tts_engine": timing["engine"] if stream_mode else ("text" if text_mode else "wav"),
                 "text_sentences": text_mode,
@@ -3446,12 +3625,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "target": target, "outcome": outcome, "endpoint": endpoint,
                 **intent_rec,
             }
-            if stages:
+            rec_stages = {k: v for k, v in stages.items() if k != "events"}
+            if rec_stages:
                 # Raw epoch ms per stage, each on the clock of the host that
                 # stamped it (README: "Hand-off stages"). `_ms` keys ending
                 # `_pi_ms`, inserted/first_partial_seen/final_seen are this
                 # host (this box); claim_recv .. partial_write_start are the desktop.
-                rec["stages"] = dict(stages)
+                rec["stages"] = rec_stages
             rec.update(_correlated_stt(node_id, t0))
             _gap_turn_done(gap["used"])
             log_latency(rec)
@@ -3678,6 +3858,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         call_kwargs["image_b64"] = ctx["image_b64"]
                     if ctx.get("burst_images_b64"):
                         call_kwargs["burst_images_b64"] = ctx["burst_images_b64"]
+                if ctx.get("audio_clips"):
+                    call_kwargs["audio_clips"] = ctx["audio_clips"]
                 brain_direct_audio = bool(BRAIN_DIRECT_AUDIO) or (os.environ.get("MVG_BRAIN_DIRECT_AUDIO", "0") == "1")
                 if brain_direct_audio:
                     if ctx.get("audio_b64"):
@@ -3774,9 +3956,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not done_event.is_set():
                 with lock:
                     nothing_queued = idx >= len(futures)
+                if nothing_queued:
+                    _maybe_context_opener()
                 if nothing_queued and not _maybe_gap_fill():
                     client_gone = True
                     break
+                if nothing_queued and progress is not None:
+                    play_end = timing["play_end"]
+                    line = progress.next_line(
+                        playing=play_end is not None and play_end > time.time(),
+                        reply_started=bool(raw_seen))
+                    if line:
+                        _submit(line)
             # Wake the moment a sentence is queued (was: a fixed 150 ms sleep
             # that delayed every first sentence by up to one poll interval).
             wake.wait(self.STREAM_STATUS_POLL_SEC)
@@ -4198,7 +4389,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                              reply_cap_words=int(prof["reply_cap_words"]),
                              device=device, medium=medium, target=target,
                              image_b64=image_b64, burst_images_b64=burst_images_b64,
-                             audio_b64=audio_b64)
+                             audio_b64=audio_b64, audio_clips=collect_audio_clips(wav_bytes))
         target_extra = {"target_rejected": True} if (
             requested_target and requested_target != target) else {}
         turn_opts = {"voice": True, "tts": tts, "gap_fill": bool(prof["gap_fill"]),

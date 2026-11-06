@@ -36,8 +36,8 @@ Every hook is optional:
 
 - `apply_defaults()` — fill env defaults with `setdefault` before config reads them.
 - `brain_call(target, prompt, timeout) -> str` — the agent answers one framed prompt.
-- `brain_call_stream(target, prompt, timeout, on_partial, stages_out) -> str` — streaming brain.
 - `brain_cancel(target, task_id) -> bool` — abort a running brain call; `cancel_active_turn(node_id)` in `gateway.py` uses it.
+- `brain_call_stream(target, prompt, timeout, on_partial, stages_out) -> str` — streaming brain. Optional keyword `audio_clips` (list of WAV bytes) is passed only if the signature accepts it and `MVG_SPLICE_RAW_AUDIO=1`.
 - `classify` — a module with `classify_choice(...)` (the addressee classifier).
 - `try_intent(text) -> dict | None` — deterministic fast path.
 - `AMBIENT_ADDRESSED` — a string: the option key the addressee classifier answers with (default `addressed_to_agent`).
@@ -67,3 +67,5 @@ domains. The PR checklist lists the exact commands.
 - Log lines are JSON, one per request, with no audio bytes and no keys.
 - A failing plugin is loud (stderr), never silent.
 - `MVG_SPOKEN_CANCEL=1` / `MVG_CANCEL_PHRASES`: spoken cancel on `/voice/turn` (`is_cancel_phrase`, `cancel_active_turn`); tests in `tests/test_spoken_cancel.py`.
+- `MVG_SPOKEN_PROGRESS=1` (+ `MVG_PROGRESS_*`): spoken progress from `stages_out["events"]` (`ProgressNarrator`); tests in `tests/test_spoken_progress.py`.
+- `MVG_CONTEXT_OPENER=1`: opener from the first stage event (`_maybe_context_opener`); tests in `tests/test_context_opener.py`.
