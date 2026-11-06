@@ -25,11 +25,29 @@ MVG_BRAIN=http MVG_BRAIN_URL=http://127.0.0.1:8000/brain python3 gateway.py
 |---|---|---|
 | `apply_defaults()` | `-> None` | fill env defaults (`setdefault` only) before the config reads them |
 | `brain_call(target, prompt, timeout)` | `-> str` | the agent answers one framed prompt |
-| `brain_call_stream(target, prompt, timeout, on_partial, stages_out)` | `-> str` | streaming brain: call `on_partial(text_so_far)` as the reply grows |
+| `brain_call_stream(target, prompt, timeout, on_partial, stages_out)` | `-> str` | streaming brain: call `on_partial(text_so_far)` as the reply grows. If its signature also takes `task_id` (or `**kwargs`) it gets the turn's task id, the same one `brain_cancel` is called with |
+| `brain_cancel(target, task_id)` | `-> bool` | optional: abort the running brain call with that task id; truthy = it was stopped. Without it, or if it returns falsy or raises, a cancel stops speech and drops the result but cannot stop the brain |
+| `brain_call_stream(target, prompt, timeout, on_partial, stages_out)` | `-> str` | streaming brain: call `on_partial(text_so_far)` as the reply grows. If the signature also takes `audio_clips` (or `**kwargs`) and `MVG_SPLICE_RAW_AUDIO=1`, it gets `audio_clips=[wav_bytes, ...]`: the turn's 16 kHz WAV, so a multimodal brain can hear the original audio. A hook without it is called exactly as before |
 | `classify` | module with `classify_choice(...)` | addressee classifier for `/ambient` and open rooms |
 | `try_intent(text)` | `-> dict \| None` | deterministic fast path; see "Fast path" below |
 | `AMBIENT_LAYA_QUESTION`, `VOICE_ADDRESSED_INSTRUCTIONS` | `str` | replace the addressee classifier's wording, for a site whose classifier was tuned on its own text |
 | `AMBIENT_ADDRESSED` | `str` | the option key the addressee classifier answers with; default `addressed_to_agent` |
+
+**Cancel.** Each `/voice/turn` and `/ask/stream` brain call gets a 12-character `task_id` and is registered as its node's active task until it ends (success, error or cancel). `gateway.cancel_active_turn(node_id)` returns `"cancelled"` (the `brain_cancel` hook ran and returned truthy), `"stopped_speech_only"` (no hook, or it returned falsy or raised: the turn stops synthesising, drops the result and ends with outcome `cancelled`) or `"no_active_turn"` (nothing running, or already cancelled). With `MVG_SPOKEN_CANCEL=1` a spoken cancel on `/voice/turn` calls it (see below).
+
+**Spoken cancel.** `MVG_SPOKEN_CANCEL=1` (default off): after STT on `/voice/turn`, a transcript that is exactly one of the cancel phrases (`stop`, `cancel`, `cancel that`, `never mind`, `nevermind`, `stop that`; override with the comma list `MVG_CANCEL_PHRASES`) or at most 3 words starting with `stop` or `cancel` calls `cancel_active_turn(node_id)`. The reply is a fixed, normally synthesised acknowledgement: `Cancelled.` or `Stopped talking, but the task may still be running.`. With no active turn the transcript is an ordinary turn. Matching is whole-utterance, never a substring, so "stop the deploy script from restarting" goes to the brain. The turn record carries `intent: "cancel"`.
+
+**Stage events.** What a plugin puts in `stages_out` for progress consumers has this shape, one dict per event:
+
+```json
+{"stage": "tool_start", "detail": "checking the build logs", "t": 2.4}
+```
+
+`stage` is a short machine name, `detail` a one-line human-readable note (at most 120 characters), `t` seconds since the brain call started. `gateway.normalize_stage_event(raw)` returns this shape from looser input (alternate keys `name`/`event`, `message`/`text`, `t_s`, `t_ms`; missing `detail` becomes `""`, missing `t` becomes `0.0`) and `None` for a non-dict or a missing stage name. The turn record's `stages` field is unchanged.
+
+**Context opener.** `MVG_CONTEXT_OPENER=1` (default off, pcm stream mode only): when the first entry in `stages_out["events"]` arrives before anything has been spoken, the gateway speaks `One moment, <detail>` through the normal TTS path and counts the generic opener clip as satisfied, so it does not also play. The later gap-fill slots are unchanged. No opener when `detail` is empty, or when the real reply started first. The turn record gains `opener_kind` (`stage`, `gap_fill` or `none`) and `opener_ms`, so `voice-latency.jsonl` compares before and after.
+
+**Spoken progress.** `MVG_SPOKEN_PROGRESS=1` (default off, pcm stream mode only): a plugin that appends event dicts to `stages_out["events"]` can have a one-line update spoken during a long task. The `detail` of the newest unseen event is spoken only when nothing is playing, the real reply has not started, its `stage` is in `MVG_PROGRESS_STAGES` (default `tool_start,milestone`), at least `MVG_PROGRESS_MIN_GAP_SEC` (default 12) have passed since the last line, and fewer than `MVG_PROGRESS_MAX_PER_TURN` (default 3) lines have been spoken. Lines use the normal TTS path. The turn record counts them as `progress_lines`; the `events` key is left out of the record's `stages`. It runs on the stream's drain loop, so there is no extra thread.
 
 Without `brain_call`, `MVG_BRAIN` defaults to `http`. A plugin that fails to import prints `lomin: plugin '<name>' failed to load (<error>); running without it` on stderr and the gateway runs without it. Site code lives in a plugin, never in this repo.
 
@@ -207,8 +225,22 @@ Every variable below is also listed, commented, in `.env.example`. Secrets have 
 | `MVG_TTS_STREAM` | `1` — `/ask/stream` sends sub-sentence pcm `sentence` events (format=pcm, 24 kHz mono, text on the first chunk of each sentence only) read from the desktop `POST /tts/stream`; `0` = whole-sentence WAV events. Logs `first_audio_ms`/`tts_first_ms` |
 | `MVG_DESKTOP_TTS_STREAM_URL` | derived: `MVG_DESKTOP_TTS_URL` + `/stream` |
 | `MVG_TTS_STREAM_MIN_CHUNK_BYTES` | `4800` (~100 ms, the hub's own forwarding floor) |
+| `MVG_TALKER_BACKENDS` | unset — comma list of `name=module:Class` plugin Talker backends for live voice (see `talker_backend.py`) |
+| `MVG_TALKER_BACKEND` | unset — name of the Talker backend for `/voice/live` (or `talker_backend` in a node's `nodes.json` entry); unset means `/voice/live` answers 501 |
+| `MVG_GEMINI_API_KEY` / `MVG_GEMINI_MODEL` / `MVG_GEMINI_VOICE` / `MVG_GEMINI_INSTRUCTIONS` / `MVG_GEMINI_URL` | unset / `gemini-2.5-flash-native-audio-preview` / unset / unset / Google endpoint — settings for the built-in `gemini` Talker backend (`MVG_TALKER_BACKEND=gemini`, `gemini_live.py`); the key is required, `MVG_GEMINI_URL` overrides the endpoint |
+| `MVG_LIVE_MAX_SEC` / `MVG_LIVE_IDLE_SEC` / `MVG_LIVE_MAX_FRAME` | `600` / `30` / `262144` — session length, idle timeout (seconds) and largest client frame (bytes) for `/voice/live` |
+| `MVG_SPOKEN_CANCEL` | `0` — `1` makes a spoken "stop" / "cancel that" on `/voice/turn` cancel the running turn (see Cancel) |
+| `MVG_CANCEL_PHRASES` | `stop,cancel,cancel that,never mind,nevermind,stop that` — comma list of exact cancel phrases |
+| `MVG_CONTEXT_OPENER` | `0` — `1` speaks "One moment, <detail>" from the first stage event in place of the generic opener clip (see Context opener) |
+| `MVG_SPOKEN_PROGRESS` | `0` — `1` speaks stage-event progress lines during long tasks (see Spoken progress) |
+| `MVG_PROGRESS_MIN_GAP_SEC` / `MVG_PROGRESS_MAX_PER_TURN` / `MVG_PROGRESS_STAGES` | `12` / `3` / `tool_start,milestone` |
 | `MVG_GAP_FILL` | `1` — filler clips while the brain is silent, pcm stream mode only (see "Gap-fill and latency metrics"); `0` disables |
 | `MVG_GAP_FILL_DIR` | `<gateway dir>/gap-fill` |
+| `MVG_SPLICE_RAW_AUDIO` | `0` — `1` passes the turn's WAV to the plugin's `brain_call_stream` as `audio_clips` (only if its signature accepts it); ADPCM and vision handling are unchanged |
+| `MVG_AUDIO_CLIPS_MAX_BYTES` | `2097152` — total clip bytes over this are dropped and logged to `voice_fallback.log` (`audio_clips_over_cap`); the turn continues |
+| `MVG_ORCHESTRATOR_PROMPT` | `0` — `1` appends a generic voice-orchestrator instruction (speak one sentence, then delegate to a subagent) to every framed brain prompt; turn records in `voice-latency.jsonl` carry `orchestrator` so runs with it on and off can be compared |
+| `MVG_ORCHESTRATOR_TEXT` | built-in text — a site's own instruction block, replacing the default |
+| `MVG_ORCHESTRATOR_TARGETS` | empty (all targets) — comma list of brain targets that get the block |
 | `MVG_GAP_FILL_AFTER_MS` | `1200` — no real audio by this long after request start: emit one acknowledge/thinking clip |
 | `MVG_GAP_FILL_LONG_MS` | `5000` — silence (audio already sent has finished playing) longer than this while the brain still works: emit one long_wait clip, at most one per turn |
 | `MVG_TEXT_SENTENCES` | `0` — `1` makes `/ask/stream` send text-only `sentence` events (no `audio_b64`) and makes `/v1/audio/speech` stream (44-byte WAV header with unknown sizes, then 24 kHz mono PCM as synthesized; `"stream": false` in the request keeps the complete-WAV reply). For a hub's native streaming TTS client. Gap-fill is disabled in this mode: the hub latches a turn to brain-audio or remote-tts and rejects a mix, and a clip is audio |
@@ -673,6 +705,26 @@ The Discord ear writes `logs/voice-latency-discord.jsonl` on the desktop
 joins both (reads this file locally or via `ssh <gateway-host> cat`) and prints p50/p90 per
 stage and node.
 
+### Measuring latency
+
+`tools/latency_summary.py` (stdlib only) reads a `voice-latency.jsonl` and prints, for the `turn` records, the count and the p50 and p90 (nearest rank) of `first_audio_ms` and `total_ms`. When records carry `opener_kind`, each kind gets its own block. Records missing a field are skipped for that field.
+
+```bash
+python3 tools/latency_summary.py logs/voice-latency.jsonl
+```
+
+Example output (fabricated placeholder numbers, to show the format only):
+
+```
+4 turns
+  first_audio_ms: n=4 p50=1200 p90=1500
+  total_ms: n=4 p50=4000 p90=5000
+opener_kind=gap_fill
+1 turns
+  first_audio_ms: n=1 p50=1200 p90=1200
+  total_ms: n=1 p50=4000 p90=4000
+```
+
 ## Brain hand-off: stages and event-driven signaling
 
 `brain_first_text_ms` (2.5-3.4 s measured 2026-09-30) is roughly 1 s of model
@@ -898,6 +950,15 @@ heartbeat URL stays valid, and `/api/voice/heartbeat` answers 204).
 Legacy endpoints (`/stt`, `/ambient`, `/ask`, `/ask/stream`) stay for one
 release; each call logs `legacy_endpoint` and `node` in the request log.
 
+## Client capture contract
+
+`/voice/turn` receives a finished upload, so the gateway has no audio from before speech start. A clipped word start is fixed on the client, which should capture a lead-in. Every number below is a recommendation, not a measured guarantee.
+
+- **Lead-in.** Keep a rolling buffer and send it from before the detected speech start. Recommended 600 ms; tune per device.
+- **Resumed speech.** If the user starts again soon after an utterance (recommended window 3 s), the client may send one combined clip instead of two turns.
+- **Format.** 16 kHz mono 16-bit PCM WAV, or the ADPCM framing (`APCM` header) when `MVG_ENABLE_ADPCM=1` (upload cap 512 KiB, larger payloads return HTTP 413).
+- **Barge-in.** Flush queued playback as soon as the user starts speaking. A server-sent `clear_audio_buffer` event for this is described in `specs/2026-11-05-talker-thinker-live-architecture.md` and does not exist yet.
+
 ## Per-node brain routing
 
 `node_id` picks the profile in `nodes.json`
@@ -1093,3 +1154,26 @@ When `MVG_ENABLE_DEFER=1`, the gateway supports deferred asynchronous voice repl
 
 
 - **Request Validation:** Malformed JSON bodies on `/ask` and `/ask/stream` return `400 Bad Request` (`{"error": "invalid JSON body"}`).
+
+## Live voice: `GET /voice/live` (WebSocket)
+
+A bidirectional session driven by a Talker backend (`talker_backend.py`) and the coordination harness (`live_harness.py`). The WebSocket layer is a small stdlib RFC 6455 server (`live_ws.py`), so there is no optional dependency to install.
+
+- Request: `GET /voice/live?node_id=<node>` with the usual WebSocket upgrade headers and, when `MVG_DEVICE_TOKENS` is set, the same bearer token as `/voice/turn` (bad or missing: 401). No backend configured: 501. No upgrade headers: 426.
+- Client binary frames: 16 kHz mono PCM16. Server binary frames: 24 kHz mono PCM16 from the Talker.
+- Text frames are JSON. Client to server: `{"event": "status"}` (speak the latest task progress), `{"event": "end"}`. Server to client: `{"event": "text"|"interrupted"|"turn_end"|"error", ...}`.
+- Close codes: 1000 normal, 1009 frame larger than `MVG_LIVE_MAX_FRAME`, 1011 backend error, 4000 idle for `MVG_LIVE_IDLE_SEC`, 4001 longer than `MVG_LIVE_MAX_SEC`.
+- Fallback: if the backend fails to open or errors mid-session, the server sends `{"event": "fallback", "endpoint": "/voice/turn", "reason": ...}` and then closes 1011. The client should continue the conversation on `/voice/turn`.
+- One line per session in `lomin.jsonl`: endpoint `/voice/live`, outcome, node, backend.
+- Text-out replies: a backend `text` event (without `"spoken": true`) is also synthesized through the normal TTS chain and sent as a binary 24 kHz PCM frame; a TTS failure sends a non-fatal `tts_error` event and the text still arrives.
+
+### Choosing a voice mode
+
+Two modes share one gateway:
+
+1. **Live (`/voice/live`)**: a native-audio Talker (the built-in `gemini` backend, or a plugin from `MVG_TALKER_BACKENDS`) holds the conversation and hands slow work to the brain with `call_thinker`. Needs `MVG_TALKER_BACKEND`. Failure falls back to mode 2 (see Fallback above).
+2. **Pipeline (`/voice/turn`)**: STT, brain, TTS per turn, with the delegate-first orchestrator prompt, spoken progress, spoken cancel and the context opener.
+
+Live-mode keys: `MVG_TALKER_BACKEND`, `MVG_TALKER_BACKENDS`, `MVG_LIVE_MAX_SEC`, `MVG_LIVE_IDLE_SEC`, `MVG_LIVE_MAX_FRAME`, and for the gemini backend `MVG_GEMINI_API_KEY`, `MVG_GEMINI_MODEL`, `MVG_GEMINI_VOICE`, `MVG_GEMINI_INSTRUCTIONS`, `MVG_GEMINI_URL`. All are in the env table and `.env.example`. Per-node choice: `talker_backend` in the node's `nodes.json` entry.
+
+Files: `talker_backend.py` (contract, mock, loader), `live_harness.py` (LiveSession and the four tools), `live_ws.py` (WebSocket bridge), `gemini_live.py` (Gemini Live backend). Gemini Live has only been tested against a fake server; run a smoke test with a real key before relying on it.
