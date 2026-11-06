@@ -2800,6 +2800,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return self._handle_health()
         if path == "/voice/pending" and is_defer_enabled():
             return self._handle_pending_get()
+        if path == "/voice/live":
+            return self._handle_voice_live()
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -4408,6 +4410,53 @@ class GatewayHandler(BaseHTTPRequestHandler):
             speaker=speaker_id, speaker_score=vid.get("score"), ctx=ctx, endpoint="/voice/turn",
             opts=turn_opts,
             log_extra={**log_extra, **id_extra, "target": target, **target_extra})
+
+    # -- /voice/live (WebSocket, live_ws.py) --
+
+    def _handle_voice_live(self):
+        import live_ws
+        t0 = time.time()
+        qs = parse_qs(urlsplit(self.path).query)
+        node_id = ((qs.get("node_id") or [""])[0] or self.headers.get("X-Node-Id") or "").strip()
+        if not self._check_bearer_auth(node_id, "/voice/live", t0):
+            return
+        backend_name = (resolve_profile(node_id).get("talker_backend")
+                        or os.environ.get("MVG_TALKER_BACKEND", "")).strip()
+        if not backend_name:
+            self._send_json(501, {"error": "live voice is not configured: set MVG_TALKER_BACKEND "
+                                           "(or talker_backend on the node)"})
+            log_request("/voice/live", (time.time() - t0) * 1000, "error:not_configured", node=node_id)
+            return
+        if not live_ws.is_upgrade_request(self.headers):
+            self._send_json(426, {"error": "WebSocket upgrade required"})
+            return
+        if not node_id:
+            self._send_json(400, {"error": "node_id required"})
+            return
+        try:
+            import talker_backend
+            import live_harness
+            backend_cls = talker_backend.load_backend(backend_name)
+        except ValueError as exc:
+            self._send_json(501, {"error": str(exc)})
+            log_request("/voice/live", (time.time() - t0) * 1000, "error:bad_backend", node=node_id)
+            return
+        self.wfile.write(live_ws.handshake_response(self.headers["Sec-WebSocket-Key"]))
+        self.wfile.flush()
+        self.close_connection = True
+        ws = live_ws.WSConn(self.connection, live_ws._env_num("MVG_LIVE_MAX_FRAME", "262144", int))
+        target = resolve_request_target(node_id, None)
+        session_id = f"live-{uuid.uuid4().hex[:8]}"
+
+        def brain(request, task_id):
+            return BRAIN_CALL(request, session_id, node_id, "", None, HIVE_TIMEOUT)
+
+        def factory(send_to_client):
+            return live_harness.LiveSession(
+                backend_cls(), {"node_id": node_id, "target": target}, send_to_client, brain,
+                getattr(sys.modules[__name__], "cancel_active_turn", None))
+        outcome = live_ws.run_live_session(ws, factory)
+        log_request("/voice/live", (time.time() - t0) * 1000, outcome, node=node_id, backend=backend_name)
 
     # -- /v1/audio/speech --
 
