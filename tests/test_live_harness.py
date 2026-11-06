@@ -136,3 +136,47 @@ def test_brain_exception_is_reported_not_raised():
         raise RuntimeError("down")
     s, b, _ = asyncio.run(_drive([call("c1", "call_thinker", {"request": "x"})], brain))
     assert "failed" in texts(b)[0]
+
+
+def _wav(n=2400, rate=24000):
+    import io, wave
+    b = io.BytesIO()
+    with wave.open(b, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+        w.writeframes(b"\x01\x00" * n)
+    return b.getvalue()
+
+
+def _run_speak(script, speak):
+    async def go():
+        backend = MockBackend(script)
+        frames = []
+        s = lh.LiveSession(backend, {"node_id": "n1"}, frames.append, lambda r, t: "", None, speak)
+        await s.open()
+        await s.run()
+        await s.close()
+        return frames
+    return asyncio.run(go())
+
+
+def test_text_reply_is_spoken():
+    frames = _run_speak([{"type": "text", "text": "hello"}], lambda t: _wav())
+    assert [f["type"] for f in frames] == ["text", "audio"]
+    assert frames[1]["synthesized"] and len(frames[1]["pcm"]) == 4800
+
+
+def test_spoken_text_not_resynthesized():
+    frames = _run_speak([{"type": "text", "text": "hi", "spoken": True}], lambda t: _wav())
+    assert [f["type"] for f in frames] == ["text"]
+
+
+def test_tts_failure_is_non_fatal():
+    def boom(t):
+        raise RuntimeError("no tts")
+    frames = _run_speak([{"type": "text", "text": "hello"}, {"type": "turn_end"}], boom)
+    assert [f["type"] for f in frames] == ["text", "tts_error", "turn_end"]
+
+
+def test_no_speak_callable_leaves_text_alone():
+    frames = _run_speak([{"type": "text", "text": "hello"}], None)
+    assert [f["type"] for f in frames] == ["text"]

@@ -1163,3 +1163,4 @@ A bidirectional session driven by a Talker backend (`talker_backend.py`) and the
 - Text frames are JSON. Client to server: `{"event": "status"}` (speak the latest task progress), `{"event": "end"}`. Server to client: `{"event": "text"|"interrupted"|"turn_end"|"error", ...}`.
 - Close codes: 1000 normal, 1009 frame larger than `MVG_LIVE_MAX_FRAME`, 1011 backend error, 4000 idle for `MVG_LIVE_IDLE_SEC`, 4001 longer than `MVG_LIVE_MAX_SEC`.
 - One line per session in `lomin.jsonl`: endpoint `/voice/live`, outcome, node, backend.
+- Text-out replies: a backend `text` event (without `"spoken": true`) is also synthesized through the normal TTS chain and sent as a binary 24 kHz PCM frame; a TTS failure sends a non-fatal `tts_error` event and the text still arrives.
