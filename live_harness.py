@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
+import time
 import uuid
 from typing import Any, Callable
 
@@ -62,6 +64,100 @@ def validate_tool_args(name: str, args: Any) -> str | None:
     return None
 
 
+def _normalize(raw):
+    """gateway.normalize_stage_event when the gateway has it, else a minimal local reading."""
+    try:
+        from gateway import normalize_stage_event
+        return normalize_stage_event(raw)
+    except Exception:
+        if isinstance(raw, dict) and isinstance(raw.get("stage"), str) and raw["stage"].strip():
+            d = raw.get("detail")
+            return {"stage": raw["stage"].strip(), "detail": " ".join(d.split())[:120] if isinstance(d, str) else "", "t": 0.0}
+        return None
+
+
+class ProgressRelay:
+    """Turns stage events into `[task progress] <detail>` lines for the Talker.
+
+    Backends with `silent_context` get each line through send_text(silent=True),
+    rate limited to one per MVG_PROGRESS_MIN_GAP_SEC with the latest always kept.
+    Other backends get nothing unprompted: the latest line is held and sent only
+    when the user asks (status()) or after set_progress_updates(true). finish()
+    delivers the held latest line at task end."""
+
+    def __init__(self, session, clock=time.monotonic, min_gap: float | None = None):
+        self.session = session
+        self.clock = clock
+        try:
+            self.min_gap = float(os.environ.get("MVG_PROGRESS_MIN_GAP_SEC", "12")) if min_gap is None else min_gap
+        except ValueError:
+            self.min_gap = 12.0
+        self.latest: str | None = None
+        self.pending: str | None = None
+        self.last_sent: float | None = None
+        self._timer = None
+
+    @property
+    def silent(self) -> bool:
+        return "silent_context" in getattr(self.session.backend, "capabilities", frozenset())
+
+    @property
+    def push_enabled(self) -> bool:
+        return self.silent or self.session.progress_updates
+
+    async def push(self, raw) -> None:
+        ev = _normalize(raw)
+        if not ev or not ev["detail"]:
+            return
+        self.latest = f"[task progress] {ev['detail']}"
+        if not self.push_enabled:
+            return
+        self.pending = self.latest
+        await self._maybe_send()
+
+    async def _maybe_send(self) -> None:
+        if self.pending is None or self.session._closed:
+            return
+        now = self.clock()
+        wait = 0.0 if self.last_sent is None else self.min_gap - (now - self.last_sent)
+        if wait > 0:
+            if self._timer is None:
+                self._timer = asyncio.get_running_loop().call_later(
+                    wait, lambda: asyncio.ensure_future(self._timer_fire()))
+            return
+        await self._send()
+
+    async def _timer_fire(self) -> None:
+        self._timer = None
+        await self._maybe_send()
+
+    async def _send(self) -> None:
+        line, self.pending = self.pending, None
+        self.last_sent = self.clock()
+        await self.session.backend.send_text(line, silent=self.silent)
+
+    async def finish(self) -> None:
+        """Task end: deliver the latest unsent line now, ignoring the gap."""
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        if self.pending is not None:
+            await self._send()
+
+    async def status(self) -> str | None:
+        """The user asked how it is going: send the latest line, spoken."""
+        if self.latest is None:
+            return None
+        await self.session.backend.send_text(self.latest, silent=False)
+        self.pending = None
+        return self.latest
+
+    def close(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+
 class LiveSession:
     def __init__(self, backend, config: dict, send_to_client: Callable, brain_call: Callable,
                  cancel_turn: Callable | None = None):
@@ -79,6 +175,16 @@ class LiveSession:
         self._worker: asyncio.Task | None = None
         self._running: dict | None = None
         self._closed = False
+        self.relay = ProgressRelay(self)
+
+    # -- progress --
+
+    async def on_stage_event(self, raw) -> None:
+        """Gateway hook: a brain stage event for the running handoff."""
+        await self.relay.push(raw)
+
+    async def status_request(self) -> str | None:
+        return await self.relay.status()
 
     # -- lifecycle --
 
@@ -105,6 +211,7 @@ class LiveSession:
         if self._closed:
             return
         self._closed = True
+        self.relay.close()
         if self._worker is not None:
             self._worker.cancel()
             try:
@@ -191,7 +298,9 @@ class LiveSession:
             finally:
                 self._running = None
             if job["cancelled"] or self._closed:
+                self.relay.pending = None
                 continue
+            await self.relay.finish()
             await self.backend.send_text(f"[thinker result, handoff {job['id']}] {text}")
 
     @staticmethod
