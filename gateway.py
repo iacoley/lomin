@@ -1881,6 +1881,24 @@ def make_frame_ctx(voice_id: dict | None, claimed_speaker: str = "", open_room: 
     return ctx
 
 
+# Orchestrator instruction (Mode 2, specs/2026-11-05-talker-thinker-live-architecture.md 6.7).
+# Generic on purpose: no tool, agent or household names. A site adds its own half
+# with MVG_ORCHESTRATOR_TEXT. Off unless MVG_ORCHESTRATOR_PROMPT=1; MVG_ORCHESTRATOR_TARGETS
+# (comma list) limits it to those brain targets.
+ORCHESTRATOR_TEXT = ("You are the voice orchestrator. Speak one specific sentence first, then delegate. "
+                     "Do not do the work yourself: hand it to a subagent and choose that subagent's "
+                     "model and effort for the task. If a follow-up arrives while a task runs, say so "
+                     "and do not start a second task silently. Progress lines come from the harness: "
+                     "do not invent progress.")
+
+
+def orchestrator_enabled(target: str = "") -> bool:
+    if os.environ.get("MVG_ORCHESTRATOR_PROMPT", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    only = [t.strip() for t in os.environ.get("MVG_ORCHESTRATOR_TARGETS", "").split(",") if t.strip()]
+    return not only or target in only
+
+
 def _display_name(name: str) -> str:
     return name[:1].upper() + name[1:]
 
@@ -1908,7 +1926,10 @@ def frame_voice_prompt(prompt: str, node_id: str, ctx: dict) -> str:
     if ctx.get("open_room"):
         bits.append("open room")
     cap = ctx.get("reply_cap_words") or 60
-    return f"[{' · '.join(bits)}] {prompt}\n\n" + SPOKEN_SUFFIX.format(n=cap) + " " + SECURITY_SUFFIX
+    tail = SPOKEN_SUFFIX.format(n=cap) + " " + SECURITY_SUFFIX
+    if orchestrator_enabled(ctx.get("target") or ""):
+        tail += " " + (os.environ.get("MVG_ORCHESTRATOR_TEXT", "").strip() or ORCHESTRATOR_TEXT)
+    return f"[{' · '.join(bits)}] {prompt}\n\n" + tail
 
 
 # Per-thread framing context for the brain worker thread (same pattern as
@@ -3325,6 +3346,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "brain_first_text_ms": timing["brain_first_text_ms"],
                 "first_sentence_ms": timing["first_sentence_ms"],
                 "gap_fill_first_ms": gap["first_ms"],
+                "orchestrator": orchestrator_enabled(target),
                 "tts_first_ms": timing["tts_first_ms"],
                 "first_audio_ms": timing["first_audio_ms"],
                 "last_audio_ms": timing["last_audio_ms"],
