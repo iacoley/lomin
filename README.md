@@ -1109,3 +1109,14 @@ A bidirectional session driven by a Talker backend (`talker_backend.py`) and the
 - Fallback: if the backend fails to open or errors mid-session, the server sends `{"event": "fallback", "endpoint": "/voice/turn", "reason": ...}` and then closes 1011. The client should continue the conversation on `/voice/turn`.
 - One line per session in `lomin.jsonl`: endpoint `/voice/live`, outcome, node, backend.
 - Text-out replies: a backend `text` event (without `"spoken": true`) is also synthesized through the normal TTS chain and sent as a binary 24 kHz PCM frame; a TTS failure sends a non-fatal `tts_error` event and the text still arrives.
+
+### Choosing a voice mode
+
+Two modes share one gateway:
+
+1. **Live (`/voice/live`)**: a native-audio Talker (the built-in `gemini` backend, or a plugin from `MVG_TALKER_BACKENDS`) holds the conversation and hands slow work to the brain with `call_thinker`. Needs `MVG_TALKER_BACKEND`. Failure falls back to mode 2 (see Fallback above).
+2. **Pipeline (`/voice/turn`)**: STT, brain, TTS per turn, with the delegate-first orchestrator prompt, spoken progress, spoken cancel and the context opener.
+
+Live-mode keys: `MVG_TALKER_BACKEND`, `MVG_TALKER_BACKENDS`, `MVG_LIVE_MAX_SEC`, `MVG_LIVE_IDLE_SEC`, `MVG_LIVE_MAX_FRAME`, and for the gemini backend `MVG_GEMINI_API_KEY`, `MVG_GEMINI_MODEL`, `MVG_GEMINI_VOICE`, `MVG_GEMINI_INSTRUCTIONS`, `MVG_GEMINI_URL`. All are in the env table and `.env.example`. Per-node choice: `talker_backend` in the node's `nodes.json` entry.
+
+Files: `talker_backend.py` (contract, mock, loader), `live_harness.py` (LiveSession and the four tools), `live_ws.py` (WebSocket bridge), `gemini_live.py` (Gemini Live backend). Gemini Live has only been tested against a fake server; run a smoke test with a real key before relying on it.
