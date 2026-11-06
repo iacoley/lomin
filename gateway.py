@@ -2150,6 +2150,58 @@ def normalize_stage_event(raw) -> dict | None:
             break
     return {"stage": stage, "detail": detail, "t": t}
 
+
+# --- Spoken progress (MVG_SPOKEN_PROGRESS=1) ----------------------------------
+
+def spoken_progress_enabled() -> bool:
+    return os.environ.get("MVG_SPOKEN_PROGRESS", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _env_num(name: str, default, cast):
+    try:
+        return cast(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return cast(default)
+
+
+class ProgressNarrator:
+    """Decides when a stage event becomes one spoken progress line. Pure: the
+    caller supplies the clock and the playback / reply state. A line is allowed
+    only when nothing is playing, the real reply has not started, the event's
+    stage is allowlisted, at least min_gap seconds have passed since the last
+    line, and fewer than max_lines have been spoken. The newest unseen eligible
+    event wins; older unseen ones are dropped, never queued."""
+
+    def __init__(self, events_source, clock=time.time, min_gap=None, max_lines=None, allow=None):
+        self.source = events_source  # callable -> list of raw events
+        self.clock = clock
+        self.min_gap = min_gap if min_gap is not None else _env_num("MVG_PROGRESS_MIN_GAP_SEC", "12", float)
+        self.max_lines = max_lines if max_lines is not None else _env_num("MVG_PROGRESS_MAX_PER_TURN", "3", int)
+        raw = os.environ.get("MVG_PROGRESS_STAGES", "tool_start,milestone")
+        self.allow = frozenset(allow if allow is not None else (x.strip() for x in raw.split(",") if x.strip()))
+        self.seen = 0
+        self.lines = 0
+        self.last_spoken = None
+
+    def next_line(self, playing: bool, reply_started: bool):
+        try:
+            events = list(self.source() or [])
+        except Exception:
+            return None
+        fresh, self.seen = events[self.seen:], len(events)
+        if reply_started or playing or self.lines >= self.max_lines:
+            return None
+        now = self.clock()
+        if self.last_spoken is not None and now - self.last_spoken < self.min_gap:
+            return None
+        for raw in reversed(fresh):
+            ev = normalize_stage_event(raw)
+            if ev and ev["stage"] in self.allow and ev["detail"]:
+                self.lines += 1
+                self.last_spoken = now
+                return ev["detail"]
+        return None
+
 APOLOGY = f"{_display_name(AGENT_NAME)} is busy right now, try again in a moment."
 
 
@@ -3363,10 +3415,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return {"tts_stream": False, "text_sentences": text_mode, "turn_id": turn_id}
             return {"tts_stream": True, "first_audio_ms": timing["first_audio_ms"],
                     "tts_first_ms": timing["tts_first_ms"], "audio_chunks": timing["chunks"],
-                    "turn_id": turn_id, "gap_fill": list(gap["used"])}
+                    "turn_id": turn_id, "gap_fill": list(gap["used"]),
+                    "progress_lines": progress.lines if progress else 0}
 
         reply = ""
         stages: dict = {}
+        # Spoken progress (MVG_SPOKEN_PROGRESS): pcm stream mode only, never on a
+        # fixed-reply (intent) turn. Events come from stages["events"].
+        progress = (ProgressNarrator(lambda: stages.get("events"))
+                    if spoken_progress_enabled() and stream_mode and not opts.get("intent_result")
+                    else None)
         # LAMMAS per-turn record: intent name or "miss", match_ms, handler_ms.
         intent_rec: dict = {"intent": "miss", "intent_match_ms": None, "intent_handler_ms": None}
 
@@ -3389,6 +3447,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "last_audio_ms": timing["last_audio_ms"],
                 "total_ms": total_ms, "sentences": timing["sentences"],
                 "reply_chars": len(reply), "gap_fill": list(gap["used"]),
+                "progress_lines": progress.lines if progress else 0,
                 "audio_s": round(timing["audio_bytes"] / (AUDIO_TARGET_RATE * 2.0), 3),
                 "tts_engine": timing["engine"] if stream_mode else ("text" if text_mode else "wav"),
                 "text_sentences": text_mode,
@@ -3396,12 +3455,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "target": target, "outcome": outcome, "endpoint": endpoint,
                 **intent_rec,
             }
-            if stages:
+            rec_stages = {k: v for k, v in stages.items() if k != "events"}
+            if rec_stages:
                 # Raw epoch ms per stage, each on the clock of the host that
                 # stamped it (README: "Hand-off stages"). `_ms` keys ending
                 # `_pi_ms`, inserted/first_partial_seen/final_seen are this
                 # host (this box); claim_recv .. partial_write_start are the desktop.
-                rec["stages"] = dict(stages)
+                rec["stages"] = rec_stages
             rec.update(_correlated_stt(node_id, t0))
             _gap_turn_done(gap["used"])
             log_latency(rec)
@@ -3723,6 +3783,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if nothing_queued and not _maybe_gap_fill():
                     client_gone = True
                     break
+                if nothing_queued and progress is not None:
+                    play_end = timing["play_end"]
+                    line = progress.next_line(
+                        playing=play_end is not None and play_end > time.time(),
+                        reply_started=bool(raw_seen))
+                    if line:
+                        _submit(line)
             # Wake the moment a sentence is queued (was: a fixed 150 ms sleep
             # that delayed every first sentence by up to one poll interval).
             wake.wait(self.STREAM_STATUS_POLL_SEC)
