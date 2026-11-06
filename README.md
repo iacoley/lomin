@@ -208,6 +208,8 @@ Every variable below is also listed, commented, in `.env.example`. Secrets have 
 | `MVG_DESKTOP_TTS_STREAM_URL` | derived: `MVG_DESKTOP_TTS_URL` + `/stream` |
 | `MVG_TTS_STREAM_MIN_CHUNK_BYTES` | `4800` (~100 ms, the hub's own forwarding floor) |
 | `MVG_TALKER_BACKENDS` | unset — comma list of `name=module:Class` plugin Talker backends for live voice (see `talker_backend.py`) |
+| `MVG_TALKER_BACKEND` | unset — name of the Talker backend for `/voice/live` (or `talker_backend` in a node's `nodes.json` entry); unset means `/voice/live` answers 501 |
+| `MVG_LIVE_MAX_SEC` / `MVG_LIVE_IDLE_SEC` / `MVG_LIVE_MAX_FRAME` | `600` / `30` / `262144` — session length, idle timeout (seconds) and largest client frame (bytes) for `/voice/live` |
 | `MVG_GAP_FILL` | `1` — filler clips while the brain is silent, pcm stream mode only (see "Gap-fill and latency metrics"); `0` disables |
 | `MVG_GAP_FILL_DIR` | `<gateway dir>/gap-fill` |
 | `MVG_GAP_FILL_AFTER_MS` | `1200` — no real audio by this long after request start: emit one acknowledge/thinking clip |
@@ -1094,3 +1096,13 @@ When `MVG_ENABLE_DEFER=1`, the gateway supports deferred asynchronous voice repl
 
 
 - **Request Validation:** Malformed JSON bodies on `/ask` and `/ask/stream` return `400 Bad Request` (`{"error": "invalid JSON body"}`).
+
+## Live voice: `GET /voice/live` (WebSocket)
+
+A bidirectional session driven by a Talker backend (`talker_backend.py`) and the coordination harness (`live_harness.py`). The WebSocket layer is a small stdlib RFC 6455 server (`live_ws.py`), so there is no optional dependency to install.
+
+- Request: `GET /voice/live?node_id=<node>` with the usual WebSocket upgrade headers and, when `MVG_DEVICE_TOKENS` is set, the same bearer token as `/voice/turn` (bad or missing: 401). No backend configured: 501. No upgrade headers: 426.
+- Client binary frames: 16 kHz mono PCM16. Server binary frames: 24 kHz mono PCM16 from the Talker.
+- Text frames are JSON. Client to server: `{"event": "status"}` (speak the latest task progress), `{"event": "end"}`. Server to client: `{"event": "text"|"interrupted"|"turn_end"|"error", ...}`.
+- Close codes: 1000 normal, 1009 frame larger than `MVG_LIVE_MAX_FRAME`, 1011 backend error, 4000 idle for `MVG_LIVE_IDLE_SEC`, 4001 longer than `MVG_LIVE_MAX_SEC`.
+- One line per session in `lomin.jsonl`: endpoint `/voice/live`, outcome, node, backend.
