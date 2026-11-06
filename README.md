@@ -673,6 +673,26 @@ The Discord ear writes `logs/voice-latency-discord.jsonl` on the desktop
 joins both (reads this file locally or via `ssh <gateway-host> cat`) and prints p50/p90 per
 stage and node.
 
+### Measuring latency
+
+`tools/latency_summary.py` (stdlib only) reads a `voice-latency.jsonl` and prints, for the `turn` records, the count and the p50 and p90 (nearest rank) of `first_audio_ms` and `total_ms`. When records carry `opener_kind`, each kind gets its own block. Records missing a field are skipped for that field.
+
+```bash
+python3 tools/latency_summary.py logs/voice-latency.jsonl
+```
+
+Example output (fabricated placeholder numbers, to show the format only):
+
+```
+4 turns
+  first_audio_ms: n=4 p50=1200 p90=1500
+  total_ms: n=4 p50=4000 p90=5000
+opener_kind=gap_fill
+1 turns
+  first_audio_ms: n=1 p50=1200 p90=1200
+  total_ms: n=1 p50=4000 p90=4000
+```
+
 ## Brain hand-off: stages and event-driven signaling
 
 `brain_first_text_ms` (2.5-3.4 s measured 2026-09-30) is roughly 1 s of model
