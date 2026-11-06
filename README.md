@@ -946,6 +946,15 @@ heartbeat URL stays valid, and `/api/voice/heartbeat` answers 204).
 Legacy endpoints (`/stt`, `/ambient`, `/ask`, `/ask/stream`) stay for one
 release; each call logs `legacy_endpoint` and `node` in the request log.
 
+## Client capture contract
+
+`/voice/turn` receives a finished upload, so the gateway has no audio from before speech start. A clipped word start is fixed on the client, which should capture a lead-in. Every number below is a recommendation, not a measured guarantee.
+
+- **Lead-in.** Keep a rolling buffer and send it from before the detected speech start. Recommended 600 ms; tune per device.
+- **Resumed speech.** If the user starts again soon after an utterance (recommended window 3 s), the client may send one combined clip instead of two turns.
+- **Format.** 16 kHz mono 16-bit PCM WAV, or the ADPCM framing (`APCM` header) when `MVG_ENABLE_ADPCM=1` (upload cap 512 KiB, larger payloads return HTTP 413).
+- **Barge-in.** Flush queued playback as soon as the user starts speaking. A server-sent `clear_audio_buffer` event for this is described in `specs/2026-11-05-talker-thinker-live-architecture.md` and does not exist yet.
+
 ## Per-node brain routing
 
 `node_id` picks the profile in `nodes.json`
