@@ -225,6 +225,7 @@ Every variable below is also listed, commented, in `.env.example`. Secrets have 
 | `MVG_TTS_STREAM` | `1` — `/ask/stream` sends sub-sentence pcm `sentence` events (format=pcm, 24 kHz mono, text on the first chunk of each sentence only) read from the desktop `POST /tts/stream`; `0` = whole-sentence WAV events. Logs `first_audio_ms`/`tts_first_ms` |
 | `MVG_DESKTOP_TTS_STREAM_URL` | derived: `MVG_DESKTOP_TTS_URL` + `/stream` |
 | `MVG_TTS_STREAM_MIN_CHUNK_BYTES` | `4800` (~100 ms, the hub's own forwarding floor) |
+| `MVG_TALKER_BACKENDS` | unset — comma list of `name=module:Class` plugin Talker backends for live voice (see `talker_backend.py`) |
 | `MVG_SPOKEN_CANCEL` | `0` — `1` makes a spoken "stop" / "cancel that" on `/voice/turn` cancel the running turn (see Cancel) |
 | `MVG_CANCEL_PHRASES` | `stop,cancel,cancel that,never mind,nevermind,stop that` — comma list of exact cancel phrases |
 | `MVG_CONTEXT_OPENER` | `0` — `1` speaks "One moment, <detail>" from the first stage event in place of the generic opener clip (see Context opener) |
