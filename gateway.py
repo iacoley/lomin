@@ -2092,6 +2092,43 @@ STREAM_BRAIN_CALL = http_brain_call_stream if MVG_BRAIN == "http" else plugin_br
 # existing override of that hook keeps its signature.
 _STAGE_SINK = threading.local()
 
+STAGE_DETAIL_MAX = 120
+
+
+def normalize_stage_event(raw) -> dict | None:
+    """Normalise a brain stage event to `{"stage": str, "detail": str, "t": float}`.
+
+    For consumers of stage events (progress narration); it does not touch what
+    is written to the turn record's `stages`. Accepts a dict with `stage` (or
+    `name` / `event`), optional `detail` (or `message` / `text`), optional `t`
+    in seconds (or `t_s`, or `t_ms` / `ms` in milliseconds). Missing detail
+    becomes "", missing or bad `t` becomes 0.0, `detail` is cut to
+    STAGE_DETAIL_MAX characters. Anything that is not a dict, or has no usable
+    stage name, gives None."""
+    if not isinstance(raw, dict):
+        return None
+    stage = ""
+    for key in ("stage", "name", "event"):
+        v = raw.get(key)
+        if isinstance(v, str) and v.strip():
+            stage = v.strip()
+            break
+    if not stage:
+        return None
+    detail = ""
+    for key in ("detail", "message", "text"):
+        v = raw.get(key)
+        if isinstance(v, str) and v.strip():
+            detail = " ".join(v.split())[:STAGE_DETAIL_MAX]
+            break
+    t = 0.0
+    for key, scale in (("t", 1.0), ("t_s", 1.0), ("t_ms", 0.001), ("ms", 0.001)):
+        v = raw.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+            t = float(v) * scale
+            break
+    return {"stage": stage, "detail": detail, "t": t}
+
 APOLOGY = f"{_display_name(AGENT_NAME)} is busy right now, try again in a moment."
 
 

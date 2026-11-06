@@ -31,6 +31,14 @@ MVG_BRAIN=http MVG_BRAIN_URL=http://127.0.0.1:8000/brain python3 gateway.py
 | `AMBIENT_LAYA_QUESTION`, `VOICE_ADDRESSED_INSTRUCTIONS` | `str` | replace the addressee classifier's wording, for a site whose classifier was tuned on its own text |
 | `AMBIENT_ADDRESSED` | `str` | the option key the addressee classifier answers with; default `addressed_to_agent` |
 
+**Stage events.** What a plugin puts in `stages_out` for progress consumers has this shape, one dict per event:
+
+```json
+{"stage": "tool_start", "detail": "checking the build logs", "t": 2.4}
+```
+
+`stage` is a short machine name, `detail` a one-line human-readable note (at most 120 characters), `t` seconds since the brain call started. `gateway.normalize_stage_event(raw)` returns this shape from looser input (alternate keys `name`/`event`, `message`/`text`, `t_s`, `t_ms`; missing `detail` becomes `""`, missing `t` becomes `0.0`) and `None` for a non-dict or a missing stage name. The turn record's `stages` field is unchanged.
+
 Without `brain_call`, `MVG_BRAIN` defaults to `http`. A plugin that fails to import prints `lomin: plugin '<name>' failed to load (<error>); running without it` on stderr and the gateway runs without it. Site code lives in a plugin, never in this repo.
 
 ## Brain: `MVG_BRAIN=http` contract
