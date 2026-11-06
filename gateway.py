@@ -2132,6 +2132,10 @@ def normalize_stage_event(raw) -> dict | None:
 
 # --- Spoken progress (MVG_SPOKEN_PROGRESS=1) ----------------------------------
 
+def context_opener_enabled() -> bool:
+    return os.environ.get("MVG_CONTEXT_OPENER", "0").strip().lower() in ("1", "true", "on", "yes")
+
+
 def spoken_progress_enabled() -> bool:
     return os.environ.get("MVG_SPOKEN_PROGRESS", "0").strip().lower() in ("1", "true", "on", "yes")
 
@@ -3404,6 +3408,30 @@ class GatewayHandler(BaseHTTPRequestHandler):
         progress = (ProgressNarrator(lambda: stages.get("events"))
                     if spoken_progress_enabled() and stream_mode and not opts.get("intent_result")
                     else None)
+        # Context opener (MVG_CONTEXT_OPENER): one specific line from the first
+        # stage event in place of the generic opener clip. pcm stream mode only.
+        opener = {"on": context_opener_enabled() and stream_mode and not opts.get("intent_result"),
+                  "kind": None, "ms": None}
+
+        def _maybe_context_opener() -> None:
+            if not opener["on"] or opener["kind"] is not None:
+                return
+            if raw_seen or timing["first_audio_ms"] is not None or timing["sentences"]:
+                opener["on"] = False  # the real reply (or other speech) got there first
+                return
+            events = stages.get("events")
+            if not events:
+                return
+            ev = normalize_stage_event(events[0])
+            opener["on"] = False  # decided by the first event, once
+            if not ev or not ev["detail"] or len(ev["detail"]) > STAGE_DETAIL_MAX:
+                return
+            gap["open"] = True  # the generic opener clip must not also play
+            opener["kind"], opener["ms"] = "stage", _ms_since_start()
+            if progress is not None:
+                progress.seen, progress.last_spoken = 1, progress.clock()
+            _submit("One moment, " + ev["detail"])
+
         # LAMMAS per-turn record: intent name or "miss", match_ms, handler_ms.
         intent_rec: dict = {"intent": "miss", "intent_match_ms": None, "intent_handler_ms": None}
 
@@ -3426,6 +3454,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "total_ms": total_ms, "sentences": timing["sentences"],
                 "reply_chars": len(reply), "gap_fill": list(gap["used"]),
                 "progress_lines": progress.lines if progress else 0,
+                **({"opener_kind": opener["kind"] or ("gap_fill" if gap["used"] else "none"),
+                    "opener_ms": opener["ms"] if opener["kind"] else gap["first_ms"]}
+                   if context_opener_enabled() else {}),
                 "audio_s": round(timing["audio_bytes"] / (AUDIO_TARGET_RATE * 2.0), 3),
                 "tts_engine": timing["engine"] if stream_mode else ("text" if text_mode else "wav"),
                 "text_sentences": text_mode,
@@ -3758,6 +3789,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not done_event.is_set():
                 with lock:
                     nothing_queued = idx >= len(futures)
+                if nothing_queued:
+                    _maybe_context_opener()
                 if nothing_queued and not _maybe_gap_fill():
                     client_gone = True
                     break

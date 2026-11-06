@@ -39,6 +39,8 @@ MVG_BRAIN=http MVG_BRAIN_URL=http://127.0.0.1:8000/brain python3 gateway.py
 
 `stage` is a short machine name, `detail` a one-line human-readable note (at most 120 characters), `t` seconds since the brain call started. `gateway.normalize_stage_event(raw)` returns this shape from looser input (alternate keys `name`/`event`, `message`/`text`, `t_s`, `t_ms`; missing `detail` becomes `""`, missing `t` becomes `0.0`) and `None` for a non-dict or a missing stage name. The turn record's `stages` field is unchanged.
 
+**Context opener.** `MVG_CONTEXT_OPENER=1` (default off, pcm stream mode only): when the first entry in `stages_out["events"]` arrives before anything has been spoken, the gateway speaks `One moment, <detail>` through the normal TTS path and counts the generic opener clip as satisfied, so it does not also play. The later gap-fill slots are unchanged. No opener when `detail` is empty, or when the real reply started first. The turn record gains `opener_kind` (`stage`, `gap_fill` or `none`) and `opener_ms`, so `voice-latency.jsonl` compares before and after.
+
 **Spoken progress.** `MVG_SPOKEN_PROGRESS=1` (default off, pcm stream mode only): a plugin that appends event dicts to `stages_out["events"]` can have a one-line update spoken during a long task. The `detail` of the newest unseen event is spoken only when nothing is playing, the real reply has not started, its `stage` is in `MVG_PROGRESS_STAGES` (default `tool_start,milestone`), at least `MVG_PROGRESS_MIN_GAP_SEC` (default 12) have passed since the last line, and fewer than `MVG_PROGRESS_MAX_PER_TURN` (default 3) lines have been spoken. Lines use the normal TTS path. The turn record counts them as `progress_lines`; the `events` key is left out of the record's `stages`. It runs on the stream's drain loop, so there is no extra thread.
 
 Without `brain_call`, `MVG_BRAIN` defaults to `http`. A plugin that fails to import prints `lomin: plugin '<name>' failed to load (<error>); running without it` on stderr and the gateway runs without it. Site code lives in a plugin, never in this repo.
@@ -217,6 +219,7 @@ Every variable below is also listed, commented, in `.env.example`. Secrets have 
 | `MVG_TTS_STREAM` | `1` — `/ask/stream` sends sub-sentence pcm `sentence` events (format=pcm, 24 kHz mono, text on the first chunk of each sentence only) read from the desktop `POST /tts/stream`; `0` = whole-sentence WAV events. Logs `first_audio_ms`/`tts_first_ms` |
 | `MVG_DESKTOP_TTS_STREAM_URL` | derived: `MVG_DESKTOP_TTS_URL` + `/stream` |
 | `MVG_TTS_STREAM_MIN_CHUNK_BYTES` | `4800` (~100 ms, the hub's own forwarding floor) |
+| `MVG_CONTEXT_OPENER` | `0` — `1` speaks "One moment, <detail>" from the first stage event in place of the generic opener clip (see Context opener) |
 | `MVG_SPOKEN_PROGRESS` | `0` — `1` speaks stage-event progress lines during long tasks (see Spoken progress) |
 | `MVG_PROGRESS_MIN_GAP_SEC` / `MVG_PROGRESS_MAX_PER_TURN` / `MVG_PROGRESS_STAGES` | `12` / `3` / `tool_start,milestone` |
 | `MVG_GAP_FILL` | `1` — filler clips while the brain is silent, pcm stream mode only (see "Gap-fill and latency metrics"); `0` disables |
